@@ -73,7 +73,7 @@ class ProducerCompressionTest(compression: String) extends ZooKeeperTestHarness 
 
     try {
       // create topic
-      TestUtils.createTopic(zkClient, topic, 1, 1, List(server))
+      TestUtils.createTopic(zkClient, topic, 2, 1, List(server))
       val partition = 0
 
       // prepare the messages
@@ -82,7 +82,7 @@ class ProducerCompressionTest(compression: String) extends ZooKeeperTestHarness 
       // make sure the returned messages are correct
       val now = System.currentTimeMillis()
       val responses = for (message <- messageValues)
-        yield producer.send(new ProducerRecord(topic, null, now, null, message.getBytes))
+        yield producer.send(new ProducerRecord(topic, partition, now, null, message.getBytes))
       for ((future, offset) <- responses.zipWithIndex) {
         assertEquals(offset.toLong, future.get.offset)
       }
@@ -92,6 +92,7 @@ class ProducerCompressionTest(compression: String) extends ZooKeeperTestHarness 
       consumer.assign(Collections.singleton(tp))
       consumer.seek(tp, 0)
       val records = TestUtils.consumeRecords(consumer, numRecords)
+      println(records)
 
       for (((messageValue, record), index) <- messageValues.zip(records).zipWithIndex) {
         assertEquals(messageValue, new String(record.value))
