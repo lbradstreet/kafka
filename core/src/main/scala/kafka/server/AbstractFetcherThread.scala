@@ -702,15 +702,15 @@ class FetcherLagMetrics(metricId: ClientIdTopicPartition) extends KafkaMetricsGr
 }
 
 class FetcherLagStats(metricId: ClientIdAndBroker) {
-  private val valueFactory = (k: ClientIdTopicPartition) => new FetcherLagMetrics(k)
-  val stats = new Pool[ClientIdTopicPartition, FetcherLagMetrics](Some(valueFactory))
+  private val valueFactory = (k: TopicPartition) => new FetcherLagMetrics(ClientIdTopicPartition(metricId.clientId, k))
+  val stats = new Pool[TopicPartition, FetcherLagMetrics](Some(valueFactory))
 
   def getAndMaybePut(topicPartition: TopicPartition): FetcherLagMetrics = {
-    stats.getAndMaybePut(ClientIdTopicPartition(metricId.clientId, topicPartition))
+    stats.getAndMaybePut(topicPartition)
   }
 
   def isReplicaInSync(topicPartition: TopicPartition): Boolean = {
-    val fetcherLagMetrics = stats.get(ClientIdTopicPartition(metricId.clientId, topicPartition))
+    val fetcherLagMetrics = stats.get(topicPartition)
     if (fetcherLagMetrics != null)
       fetcherLagMetrics.lag <= 0
     else
@@ -718,13 +718,13 @@ class FetcherLagStats(metricId: ClientIdAndBroker) {
   }
 
   def unregister(topicPartition: TopicPartition): Unit = {
-    val lagMetrics = stats.remove(ClientIdTopicPartition(metricId.clientId, topicPartition))
+    val lagMetrics = stats.remove(topicPartition)
     if (lagMetrics != null) lagMetrics.unregister()
   }
 
   def unregister(): Unit = {
-    stats.keys.toBuffer.foreach { key: ClientIdTopicPartition =>
-      unregister(key.topicPartition)
+    stats.keys.toBuffer.foreach { key: TopicPartition =>
+      unregister(key)
     }
   }
 }
