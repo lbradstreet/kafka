@@ -59,6 +59,10 @@ class ReplicaAlterLogDirsThread(name: String,
     replicaMgr.futureLocalLogOrException(topicPartition).latestEpoch
   }
 
+  override protected def logStartOffset(topicPartition: TopicPartition): Long = {
+    replicaMgr.futureLocalLogOrException(topicPartition).logStartOffset
+  }
+
   override protected def logEndOffset(topicPartition: TopicPartition): Long = {
     replicaMgr.futureLocalLogOrException(topicPartition).logEndOffset
   }
@@ -223,7 +227,7 @@ class ReplicaAlterLogDirsThread(name: String,
     val partitionsWithError = mutable.Set[TopicPartition]()
 
     try {
-      val logStartOffset = replicaMgr.futureLocalLogOrException(tp).logStartOffset
+      val logStartOffset = this.logStartOffset(tp)
       requestMap.put(tp, new FetchRequest.PartitionData(fetchState.fetchOffset, logStartOffset,
         fetchSize, Optional.of(fetchState.currentLeaderEpoch)))
     } catch {
