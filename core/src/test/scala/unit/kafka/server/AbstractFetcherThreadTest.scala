@@ -814,7 +814,8 @@ class AbstractFetcherThreadTest {
     extends AbstractFetcherThread("mock-fetcher",
       clientId = "mock-fetcher",
       sourceBroker = new BrokerEndPoint(leaderId, host = "localhost", port = Random.nextInt()),
-      failedPartitions) {
+      failedPartitions,
+      fetchSize = 100000) {
 
     import MockFetcherThread.PartitionState
 
@@ -1022,7 +1023,5 @@ class AbstractFetcherThreadTest {
       checkLeaderEpochAndThrow(leaderEpoch, leaderState)
       leaderState.logEndOffset
     }
-
   }
-
 }

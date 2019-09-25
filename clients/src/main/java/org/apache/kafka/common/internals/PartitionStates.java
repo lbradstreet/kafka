@@ -57,6 +57,10 @@ public class PartitionStates<S> {
             map.put(topicPartition, state);
     }
 
+    public void update(TopicPartition topicPartition, S state) {
+        map.put(topicPartition, state);
+        updateSize();
+    }
     public void updateAndMoveToEnd(TopicPartition topicPartition, S state) {
         map.remove(topicPartition);
         map.put(topicPartition, state);
@@ -101,7 +105,7 @@ public class PartitionStates<S> {
     }
 
     public LinkedHashMap<TopicPartition, S> partitionStateMap() {
-        return new LinkedHashMap<>(map);
+        return map;
     }
 
     /**

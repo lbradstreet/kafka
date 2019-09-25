@@ -47,6 +47,7 @@ class ReplicaAlterLogDirsThread(name: String,
                                 clientId = name,
                                 sourceBroker = sourceBroker,
                                 failedPartitions,
+                                fetchSize = brokerConfig.replicaFetchMaxBytes,
                                 fetchBackOffMs = brokerConfig.replicaFetchBackoffMs,
                                 isInterruptible = false) {
 
