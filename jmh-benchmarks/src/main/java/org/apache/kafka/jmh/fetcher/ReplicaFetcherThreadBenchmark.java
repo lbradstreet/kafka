@@ -90,8 +90,7 @@ import java.util.concurrent.TimeUnit;
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
 
 public class ReplicaFetcherThreadBenchmark {
-    //@Param({"500", "5000", "10000"})
-    @Param({"1000", "5000", "10000"})
+    @Param({"500", "1000", "5000", "10000"})
     private static String partitionCount;
 
     @State(Scope.Thread)
