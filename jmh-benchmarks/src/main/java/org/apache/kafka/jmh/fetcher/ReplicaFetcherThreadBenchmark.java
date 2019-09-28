@@ -147,6 +147,7 @@ public class ReplicaFetcherThreadBenchmark {
                 Mockito.when(partitionStateStore.fetchTopicConfig()).thenReturn(new Properties());
                 OffsetCheckpoints offsetCheckpoints = Mockito.mock(OffsetCheckpoints.class);
                 Mockito.when(offsetCheckpoints.fetch(logDir.getAbsolutePath(), tp)).thenReturn(Option.apply(0L));
+                /*
                 Partition partition = new Partition(tp, 100,
                         ApiVersion$.MODULE$.latestVersion(), 0, Time.SYSTEM,
                         partitionStateStore, new DelayedOperationsMock(tp), Mockito.mock(MetadataCache.class),
@@ -156,10 +157,11 @@ public class ReplicaFetcherThreadBenchmark {
                 while (partition.log().isEmpty()) {
                     // spin until log is setup
                 }
+                 */
 
                 partitions.put(tp, new OffsetAndEpoch(0, 0));
-                partitionValues.put(tp, partition);
-                initialFetched.put(partition.topicPartition(), new FetchResponse.PartitionData<>(Errors.NONE, 0, 0, 0,
+                //partitionValues.put(tp, partition);
+                initialFetched.put(tp, new FetchResponse.PartitionData<>(Errors.NONE, 0, 0, 0,
                         new LinkedList<>(),
                         new BaseRecords() {
                             @Override
@@ -255,7 +257,8 @@ class ReplicaFetcherBenchThread extends ReplicaFetcherThread {
 
     @Override
     public long logStartOffset(TopicPartition topicPartition) {
-        return partitions.get(topicPartition).localLogOrException().logStartOffset();
+        return 0L;
+        //return partitions.get(topicPartition).localLogOrException().logStartOffset();
     }
 
     @Override
