@@ -632,7 +632,7 @@ abstract class AbstractFetcherThread(name: String,
         Option(partitionStates.stateValue(partition)).foreach { currentFetchState =>
           if (!currentFetchState.isDelayed) {
             partitionStates.updateAndMoveToEnd(partition, PartitionFetchState(currentFetchState.fetchRequest,
-              currentFetchState.lag, new DelayedItem(delay), currentFetchState.state))
+              currentFetchState.lag, Some(new DelayedItem(delay)), currentFetchState.state))
           }
         }
       }
@@ -774,7 +774,7 @@ case object Fetching extends ReplicaState
 
 object PartitionFetchState {
   def apply(fetchRequest: FetchRequest.PartitionData, lag: Option[Long], state: ReplicaState): PartitionFetchState = {
-    PartitionFetchState(fetchRequest, lag, new DelayedItem(0), state)
+    PartitionFetchState(fetchRequest, lag, None, state)
   }
 }
 
@@ -788,14 +788,14 @@ object PartitionFetchState {
  */
 case class PartitionFetchState(fetchRequest: FetchRequest.PartitionData,
                                lag: Option[Long],
-                               delay: DelayedItem,
+                               delay: Option[DelayedItem],
                                state: ReplicaState) {
 
   def isReadyForFetch: Boolean = state == Fetching && !isDelayed
 
   def isTruncating: Boolean = state == Truncating && !isDelayed
 
-  def isDelayed: Boolean = delay.getDelay(TimeUnit.MILLISECONDS) > 0
+  def isDelayed: Boolean = delay.exists(_.getDelay(TimeUnit.MILLISECONDS) > 0)
 
   def isReplicaInSync: Boolean = lag.isDefined && lag.get <= 0
 
@@ -804,7 +804,7 @@ case class PartitionFetchState(fetchRequest: FetchRequest.PartitionData,
   def currentLeaderEpoch: Integer = fetchRequest.currentLeaderEpoch.get
 
   def updateState(state: ReplicaState): PartitionFetchState = {
-    PartitionFetchState(fetchRequest, lag, new DelayedItem(0), state)
+    PartitionFetchState(fetchRequest, lag, None, state)
   }
 
   def updateLag(lag: Long): PartitionFetchState = {
@@ -814,7 +814,7 @@ case class PartitionFetchState(fetchRequest: FetchRequest.PartitionData,
   def updateFetchOffset(fetchOffset: Long): PartitionFetchState = {
     if (fetchOffset != fetchRequest.fetchOffset)
       PartitionFetchState(new FetchRequest.PartitionData(fetchOffset, fetchRequest.logStartOffset, fetchRequest.maxBytes, fetchRequest.currentLeaderEpoch),
-        lag, new DelayedItem(0), state)
+        lag, None, state)
     else
       this
   }
@@ -822,7 +822,7 @@ case class PartitionFetchState(fetchRequest: FetchRequest.PartitionData,
   def updateStartOffset(logStartOffset: Long): PartitionFetchState = {
     if (fetchRequest.logStartOffset != logStartOffset)
       PartitionFetchState(new FetchRequest.PartitionData(fetchRequest.fetchOffset, logStartOffset, fetchRequest.maxBytes, fetchRequest.currentLeaderEpoch),
-        lag, new DelayedItem(0), state)
+        lag, None, state)
     else
       this
   }
@@ -831,7 +831,7 @@ case class PartitionFetchState(fetchRequest: FetchRequest.PartitionData,
     s"FetchState(fetchOffset=${fetchRequest.fetchOffset}" +
       s", currentLeaderEpoch=${fetchRequest.currentLeaderEpoch}" +
       s", state=$state" +
-      s", delay=${delay.delayMs}ms" +
+      s", delay=${delay.map(_.delayMs).getOrElse(0)}ms" +
       s")"
   }
 }
