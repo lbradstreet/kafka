@@ -102,6 +102,7 @@ public class ReplicaFetcherThreadBenchmark {
     private LogManager logManager;
     private File logDir = new File(System.getProperty("java.io.tmpdir"), UUID.randomUUID().toString());
     private KafkaScheduler scheduler = new KafkaScheduler(1, "scheduler", true);
+    HashMap<TopicPartition, Partition> partitionValues = new HashMap<>();
 
     @Setup(Level.Trial)
     public void setup() {
@@ -134,7 +135,6 @@ public class ReplicaFetcherThreadBenchmark {
 
         LinkedHashMap<TopicPartition, FetchResponse.PartitionData<BaseRecords>> initialFetched = new LinkedHashMap<>();
         scala.collection.mutable.Map<TopicPartition, OffsetAndEpoch> offsetAndEpochs = new scala.collection.mutable.HashMap<>();
-        HashMap<TopicPartition, Partition> partitionValues = new HashMap<>();
         for (int i = 0; i < Integer.parseInt(partitionCount); i++) {
             TopicPartition tp = new TopicPartition("topic", i);
 
@@ -177,10 +177,6 @@ public class ReplicaFetcherThreadBenchmark {
 
     @TearDown(Level.Trial)
     public void tearDown() {
-        Iterator<Log> logIterator = logManager.allLogs().iterator();
-        while (logIterator.hasNext())
-            logIterator.next().delete();
-        
         logManager.shutdown();
         scheduler.shutdown();
         logDir.delete();
