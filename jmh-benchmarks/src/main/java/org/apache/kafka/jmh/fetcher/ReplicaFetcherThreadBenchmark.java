@@ -24,6 +24,7 @@ import kafka.cluster.Partition;
 import kafka.cluster.PartitionStateStore;
 import kafka.log.CleanerConfig;
 import kafka.log.Defaults;
+import kafka.log.Log;
 import kafka.log.LogAppendInfo;
 import kafka.log.LogConfig;
 import kafka.log.LogManager;
@@ -176,6 +177,10 @@ public class ReplicaFetcherThreadBenchmark {
 
     @TearDown(Level.Trial)
     public void tearDown() {
+        Iterator<Log> logIterator = logManager.allLogs().iterator();
+        while (logIterator.hasNext())
+            logIterator.next().delete();
+        
         logManager.shutdown();
         scheduler.shutdown();
         logDir.delete();
