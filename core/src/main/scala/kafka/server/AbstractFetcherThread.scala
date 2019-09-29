@@ -411,9 +411,8 @@ abstract class AbstractFetcherThread(name: String,
 
   def updateLogStartOffset (topicPartition: TopicPartition, partitionFetchState: PartitionFetchState): PartitionFetchState = {
     val newPartitionFetchState = partitionFetchState.updateStartOffset(logStartOffset(topicPartition));
-    if (newPartitionFetchState != partitionFetchState) {
+    if (newPartitionFetchState != partitionFetchState)
       partitionStates.update(topicPartition, newPartitionFetchState)
-    }
 
     newPartitionFetchState
   }

@@ -110,7 +110,6 @@ public class ReplicaFetcherThreadBenchmark {
             props.put("zookeeper.connect", "127.0.0.1:9999");
             KafkaConfig config = new KafkaConfig(props);
 
-            /*
             LogConfig logConfig = createLogConfig();
             logManager = new LogManager(JavaConverters.asScalaIteratorConverter(logDirs.iterator()).asScala().toSeq(),
                     JavaConverters.asScalaIteratorConverter(new ArrayList<File>().iterator()).asScala().toSeq(),
@@ -128,7 +127,6 @@ public class ReplicaFetcherThreadBenchmark {
                     brokerTopicStats,
                     logDirFailureChannel,
                     Time.SYSTEM);
-             */
 
             scala.collection.mutable.Map<TopicPartition, OffsetAndEpoch> partitions =
                     new scala.collection.mutable.HashMap<>();
@@ -137,7 +135,6 @@ public class ReplicaFetcherThreadBenchmark {
             for (int i = 0; i < Integer.parseInt(partitionCount); i++) {
                 TopicPartition tp = new TopicPartition("mytopic", i);
 
-                /*
                 // one leader, plus two followers
                 List<Integer> replicas = new ArrayList<>();
                 replicas.add(0);
@@ -158,10 +155,9 @@ public class ReplicaFetcherThreadBenchmark {
                 while (partition.log().isEmpty()) {
                     // spin until log is setup
                 }
-                 */
 
                 partitions.put(tp, new OffsetAndEpoch(0, 0));
-                //partitionValues.put(tp, partition);
+                partitionValues.put(tp, partition);
                 initialFetched.put(tp, new FetchResponse.PartitionData<>(Errors.NONE, 0, 0, 0,
                         new LinkedList<>(),
                         new BaseRecords() {
@@ -259,9 +255,9 @@ class ReplicaFetcherBenchThread extends ReplicaFetcherThread {
 
     @Override
     public long logStartOffset(TopicPartition topicPartition) {
-        return 0L;
-        //return startOffset++;
-        //return partitions.get(topicPartition).localLogOrException().logStartOffset();
+        // return 0L;
+        // return startOffset++;
+        return partitions.get(topicPartition).localLogOrException().logStartOffset();
     }
 
     @Override
