@@ -58,6 +58,9 @@ public class FetchSessionBenchmark {
     @Param(value = {"0", "10", "50", "100"})
     private int updatedPercentage;
 
+    @Param(value = {"false", "true"})
+    private boolean presize;
+
     private LinkedHashMap<TopicPartition, FetchRequest.PartitionData> fetches;
     private FetchSessionHandler handler;
 
@@ -101,7 +104,12 @@ public class FetchSessionBenchmark {
     @Benchmark
     @OutputTimeUnit(TimeUnit.NANOSECONDS)
     public void incrementalFetchSessionBuild() {
-        FetchSessionHandler.Builder builder = handler.newBuilder();
+        FetchSessionHandler.Builder builder;
+        if (presize)
+            builder = handler.newBuilder(fetches.size());
+        else
+            builder = handler.newBuilder();
+
         for (Map.Entry<TopicPartition, FetchRequest.PartitionData> entry: fetches.entrySet()) {
             builder.add(entry.getKey(), entry.getValue());
         }

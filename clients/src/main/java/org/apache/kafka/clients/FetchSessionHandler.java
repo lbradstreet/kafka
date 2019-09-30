@@ -188,6 +188,10 @@ public class FetchSessionHandler {
         private final ArrayList<TopicPartition> added = new ArrayList<>();
         private final ArrayList<TopicPartition> altered = new ArrayList<>();
 
+        Builder() {
+            this.next = new LinkedHashMap<>();
+        }
+
         Builder(int initialSize) {
             this.next = new LinkedHashMap<>(initialSize);
         }
@@ -241,7 +245,7 @@ public class FetchSessionHandler {
     }
 
     public Builder newBuilder() {
-        return new Builder(0);
+        return new Builder();
     }
 
     public Builder newBuilder(int initialSize) {
