@@ -83,7 +83,7 @@ def job = {
             } else {
                 return ""
 			}
-                    }
+         }
         ]
 
         result = parallel testTargets
