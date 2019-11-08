@@ -16,6 +16,8 @@
  */
 package kafka.security.auth
 
+import java.util.regex.Pattern
+
 import kafka.common.{BaseEnum, KafkaException}
 import org.apache.kafka.common.acl.AclOperation
 
@@ -79,7 +81,9 @@ object Operation {
     op.getOrElse(throw new KafkaException(operation + " not a valid operation name. The valid names are " + values.mkString(",")))
   }
 
-  def fromJava(operation: AclOperation): Operation = fromString(operation.toString.replaceAll("_", ""))
+  def underscorePattern = new Pattern("_")
+
+  def fromJava(operation: AclOperation): Operation = fromString(underscorePattern.matcher(operation.toString).replaceAll(""))
 
   def values: Seq[Operation] = List(Read, Write, Create, Delete, Alter, Describe, ClusterAction, AlterConfigs,
      DescribeConfigs, IdempotentWrite, All)
