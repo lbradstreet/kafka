@@ -91,8 +91,10 @@ import java.util.Map;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -2307,15 +2309,39 @@ public class SenderTest {
         Future<RecordMetadata> request1 = appendToAccumulator(tp0, time.milliseconds(), "key1", "value1");
         Future<RecordMetadata> request2 = appendToAccumulator(tp0, time.milliseconds(), "key2", "value2");
 
+
+
         // send request
         sender.runOnce();
         assertEquals(1, sender.inFlightBatches(tp0).size());
+
+        CompletableFuture<Boolean> finished = new CompletableFuture<>();
+        Thread t = new Thread() {
+            @Override
+            public void run() {
+                try {
+                    accumulator.awaitFlushCompletion();
+                    finished.complete(true);
+                } catch (InterruptedException ie) {
+                }
+            }
+        };
+        t.start();
+        Thread.sleep(1000);
+
+        assertFalse(finished.isDone());
+
         // return a MESSAGE_TOO_LARGE error
         client.respond(produceResponse(tp0, -1, Errors.MESSAGE_TOO_LARGE, -1));
         sender.runOnce();
 
+        Thread.sleep(1000);
+        assertFalse(finished.isDone());
+
         // process retried response
         sender.runOnce();
+        assertEquals(1, sender.inFlightBatches(tp0).size());
+
         client.respond(produceResponse(tp0, 0, Errors.NONE, 0));
         sender.runOnce();
 
@@ -2323,6 +2349,7 @@ public class SenderTest {
         assertEquals(0, sender.inFlightBatches(tp0).size());
         time.sleep(2000);
         sender.runOnce();
+        assertTrue(finished.isDone());
     }
 
     class AssertEndTxnRequestMatcher implements MockClient.RequestMatcher {
