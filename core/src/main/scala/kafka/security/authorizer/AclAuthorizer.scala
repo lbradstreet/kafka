@@ -228,12 +228,10 @@ class AclAuthorizer extends Authorizer with Logging {
   }
 
   override def acls(filter: AclBindingFilter): lang.Iterable[AclBinding] = {
-    inReadLock(lock) {
-      unorderedAcls.flatMap { case (resource, versionedAcls) =>
-        versionedAcls.acls.map(acl => AuthorizerUtils.convertToAclBinding(resource, acl))
-            .filter(filter.matches)
-      }.asJava
-    }
+    aclCache.flatMap { case (resource, versionedAcls) =>
+      versionedAcls.acls.map(acl => AuthorizerUtils.convertToAclBinding(resource, acl))
+        .filter(filter.matches)
+    }.asJava
   }
 
   override def close(): Unit = {
@@ -304,25 +302,26 @@ class AclAuthorizer extends Authorizer with Logging {
   }
 
   private def matchingAcls(resourceType: ResourceType, resourceName: String): Set[Acl] = {
-    inReadLock(lock) {
-      val wildcard = aclCache.get(Resource(resourceType, Acl.WildCardResource, PatternType.LITERAL))
-        .map(_.acls)
-        .getOrElse(Set.empty[Acl])
+    // snapshot immutable aclCache to avoid the need for a readLock that
+    // may get blocked by ACL updates
+    val aclCacheSnapshot = aclCache
+    val wildcard = aclCacheSnapshot.get(Resource(resourceType, Acl.WildCardResource, PatternType.LITERAL))
+      .map(_.acls)
+      .getOrElse(Set.empty[Acl])
 
-      val literal = aclCache.get(Resource(resourceType, resourceName, PatternType.LITERAL))
-        .map(_.acls)
-        .getOrElse(Set.empty[Acl])
+    val literal = aclCacheSnapshot.get(Resource(resourceType, resourceName, PatternType.LITERAL))
+      .map(_.acls)
+      .getOrElse(Set.empty[Acl])
 
-      val prefixed = aclCache
-        .from(Resource(resourceType, resourceName, PatternType.PREFIXED))
-        .to(Resource(resourceType, resourceName.take(1), PatternType.PREFIXED))
-        .filterKeys(resource => resourceName.startsWith(resource.name))
-        .values
-        .flatMap { _.acls }
-        .toSet
+    val prefixed = aclCacheSnapshot
+      .from(Resource(resourceType, resourceName, PatternType.PREFIXED))
+      .to(Resource(resourceType, resourceName.take(1), PatternType.PREFIXED))
+      .filterKeys(resource => resourceName.startsWith(resource.name))
+      .values
+      .flatMap { _.acls }
+      .toSet
 
-      prefixed ++ wildcard ++ literal
-    }
+    prefixed ++ wildcard ++ literal
   }
 
   private def matchingAclExists(operation: Operation, resource: Resource, principal: KafkaPrincipal, host: String, permissionType: PermissionType, acls: Set[Acl]): Boolean = {
@@ -452,10 +451,6 @@ class AclAuthorizer extends Authorizer with Logging {
       false
     }
   }
-
-  // Returns Map instead of SortedMap since most callers don't care about ordering. In Scala 2.13, mapping from SortedMap
-  // to Map is restricted by default
-  private def unorderedAcls: Map[Resource, VersionedAcls] = aclCache
 
   private def getAclsFromCache(resource: Resource): VersionedAcls = {
     aclCache.getOrElse(resource, throw new IllegalArgumentException(s"ACLs do not exist in the cache for resource $resource"))
