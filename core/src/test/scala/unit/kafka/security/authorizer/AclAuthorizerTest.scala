@@ -692,6 +692,19 @@ class AclAuthorizerTest extends ZooKeeperTestHarness {
   }
 
   @Test
+  def testAclsFilterBench(): Unit = {
+    for (i <- 0 to 100000) {
+      val resource1 = new ResourcePattern(TOPIC, "foo-" + UUID.randomUUID(), LITERAL)
+      val acl1 = new AclBinding(resource1, new AccessControlEntry(principal.toString, WildcardHost, READ, ALLOW))
+      aclAuthorizer.createAcls(requestContext, List(acl1).asJava)
+    }
+    val timeStart = System.nanoTime()
+    aclAuthorizer.acls(AclBindingFilter.ANY)
+    val timeEnd = System.nanoTime()
+    println((timeEnd - timeStart)/1000000.0)
+  }
+
+  @Test
   def testAclsFilter(): Unit = {
     val resource1 = new ResourcePattern(TOPIC, "foo-" + UUID.randomUUID(), LITERAL)
     val resource2 = new ResourcePattern(TOPIC, "bar-" + UUID.randomUUID(), LITERAL)
