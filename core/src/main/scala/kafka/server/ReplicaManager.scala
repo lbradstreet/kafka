@@ -1182,11 +1182,17 @@ class ReplicaManager(val config: KafkaConfig,
     val requestPartitionStates = leaderAndIsrRequest.partitionStates.asScala
     stateChangeLogger.info(s"Handling LeaderAndIsr request correlationId $correlationId from controller " +
       s"$controllerId for ${requestPartitionStates.size} partitions")
+
     if (stateChangeLogger.isTraceEnabled)
       stateChangeLogger.trace(s"Received LeaderAndIsr request correlation id $correlationId from controller $controllerId " +
         s"epoch ${leaderAndIsrRequest.controllerEpoch}, partitions $requestPartitionStates.")
 
-    replicaStateChangeLock synchronized {
+    val ignoredOffline = new mutable.ListBuffer[TopicPartition]()
+    val ignoredNotAssigned = new mutable.ListBuffer[(TopicPartition, java.util.List[Integer])]()
+    val ignoredSmallerLeaderEpoch = new mutable.ListBuffer[(LeaderAndIsrPartitionState, Int)]()
+    val ignoredMatchesLeaderEpoch = new mutable.ListBuffer[LeaderAndIsrPartitionState]()
+
+    val response = replicaStateChangeLock synchronized {
       if (leaderAndIsrRequest.controllerEpoch < controllerEpoch) {
         stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from controller $controllerId with " +
           s"correlation id $correlationId since its controller epoch ${leaderAndIsrRequest.controllerEpoch} is old. " +
@@ -1204,10 +1210,7 @@ class ReplicaManager(val config: KafkaConfig,
           val topicPartition = new TopicPartition(partitionState.topicName, partitionState.partitionIndex)
           val partitionOpt = getPartition(topicPartition) match {
             case HostedPartition.Offline =>
-              stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from " +
-                s"controller $controllerId with correlation id $correlationId " +
-                s"epoch $controllerEpoch for partition $topicPartition as the local replica for the " +
-                "partition is in an offline log directory")
+              ignoredOffline += topicPartition
               responseMap.put(topicPartition, Errors.KAFKA_STORAGE_ERROR)
               None
 
@@ -1231,23 +1234,14 @@ class ReplicaManager(val config: KafkaConfig,
               if (partitionState.replicas.contains(localBrokerId))
                 partitionStates.put(partition, partitionState)
               else {
-                stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from controller $controllerId with " +
-                  s"correlation id $correlationId epoch $controllerEpoch for partition $topicPartition as itself is not " +
-                  s"in assigned replica list ${partitionState.replicas.asScala.mkString(",")}")
+                ignoredNotAssigned += ((topicPartition, partitionState.replicas))
                 responseMap.put(topicPartition, Errors.UNKNOWN_TOPIC_OR_PARTITION)
               }
             } else if (requestLeaderEpoch < currentLeaderEpoch) {
-              stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from " +
-                s"controller $controllerId with correlation id $correlationId " +
-                s"epoch $controllerEpoch for partition $topicPartition since its associated " +
-                s"leader epoch $requestLeaderEpoch is smaller than the current " +
-                s"leader epoch $currentLeaderEpoch")
+              ignoredSmallerLeaderEpoch += ((partitionState, requestLeaderEpoch))
               responseMap.put(topicPartition, Errors.STALE_CONTROLLER_EPOCH)
             } else {
-              stateChangeLogger.info(s"Ignoring LeaderAndIsr request from " +
-                s"controller $controllerId with correlation id $correlationId " +
-                s"epoch $controllerEpoch for partition $topicPartition since its associated " +
-                s"leader epoch $requestLeaderEpoch matches the current leader epoch")
+              ignoredMatchesLeaderEpoch += partitionState
               responseMap.put(topicPartition, Errors.STALE_CONTROLLER_EPOCH)
             }
           }
@@ -1335,6 +1329,41 @@ class ReplicaManager(val config: KafkaConfig,
           .setPartitionErrors(responsePartitions.asJava))
       }
     }
+
+    if (ignoredOffline.nonEmpty)
+      stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from " +
+        s"controller $controllerId with correlation id $correlationId " +
+        s"epoch $controllerEpoch for partitions $ignoredOffline as the local replica " +
+        s"for the partition is in an offline log directory")
+
+    if (ignoredNotAssigned.nonEmpty)
+      stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from controller $controllerId with " +
+        s"correlation id $correlationId epoch $controllerEpoch as partitions are not in the assigned replica lists" +
+        s"$ignoredNotAssigned.")
+
+    if (ignoredSmallerLeaderEpoch.nonEmpty) {
+      val epochStrings = ignoredSmallerLeaderEpoch.map { case (ps, currentEpoch) =>
+        s"${ps.topicName}-${ps.partitionIndex} request epoch ${ps.leaderEpoch} current epoch $currentEpoch"
+      }.mkString(",")
+
+      stateChangeLogger.warn(s"Ignoring LeaderAndIsr request from " +
+        s"controller $controllerId with correlation id $correlationId " +
+        s"epoch $controllerEpoch for partition since its associated " +
+        s"leader epoch is smaller than the current " +
+        s"leader epoch: $epochStrings.")
+    }
+
+    if (ignoredMatchesLeaderEpoch.nonEmpty) {
+      val epochStrings = ignoredMatchesLeaderEpoch.map { ps =>
+        s"${ps.topicName}-${ps.partitionIndex} epoch ${ps.leaderEpoch}"
+      }.mkString(",")
+      stateChangeLogger.info(s"Ignoring LeaderAndIsr request from " +
+        s"controller $controllerId with correlation id $correlationId " +
+        s"epoch $controllerEpoch for its associated " +
+        s"leader epoch matches the current leader epoch: $epochStrings")
+    }
+
+    response
   }
 
   /*
@@ -1357,11 +1386,13 @@ class ReplicaManager(val config: KafkaConfig,
                           responseMap: mutable.Map[TopicPartition, Errors],
                           highWatermarkCheckpoints: OffsetCheckpoints): Set[Partition] = {
     val traceEnabled = stateChangeLogger.isTraceEnabled
+
+    if (traceEnabled)
+      stateChangeLogger.trace(s"Handling LeaderAndIsr request correlationId $correlationId from " +
+        s"controller $controllerId epoch $controllerEpoch starting the become-leader transition for " +
+        s"partitions ${partitionStates.keys}")
+
     partitionStates.keys.foreach { partition =>
-      if (traceEnabled)
-        stateChangeLogger.trace(s"Handling LeaderAndIsr request correlationId $correlationId from " +
-          s"controller $controllerId epoch $controllerEpoch starting the become-leader transition for " +
-          s"partition ${partition.topicPartition}")
       responseMap.put(partition.topicPartition, Errors.NONE)
     }
 
