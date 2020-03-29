@@ -1183,11 +1183,8 @@ class ReplicaManager(val config: KafkaConfig,
     stateChangeLogger.info(s"Handling LeaderAndIsr request correlationId $correlationId from controller " +
       s"$controllerId for ${requestPartitionStates.size} partitions")
     if (stateChangeLogger.isTraceEnabled)
-      leaderAndIsrRequest.partitionStates.asScala.foreach { partitionState =>
-        stateChangeLogger.trace(s"Received LeaderAndIsr request $partitionState " +
-          s"correlation id $correlationId from controller $controllerId " +
-          s"epoch ${leaderAndIsrRequest.controllerEpoch}")
-      }
+      stateChangeLogger.trace(s"Received LeaderAndIsr request correlation id $correlationId from controller $controllerId " +
+        s"epoch ${leaderAndIsrRequest.controllerEpoch}, partitions $requestPartitionStates.")
 
     replicaStateChangeLock synchronized {
       if (leaderAndIsrRequest.controllerEpoch < controllerEpoch) {
