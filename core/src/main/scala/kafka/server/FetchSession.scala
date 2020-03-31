@@ -71,8 +71,7 @@ object FetchSession {
   * Note that fetcherLogStartOffset is the LSO of the follower performing the fetch, whereas
   * localLogStartOffset is the log start offset of the partition on this broker.
   */
-class CachedPartition(val topic: String,
-                      val partition: Int,
+class CachedPartition(val topicPartition: TopicPartition,
                       var maxBytes: Int,
                       var fetchOffset: Long,
                       var highWatermark: Long,
@@ -89,19 +88,16 @@ class CachedPartition(val topic: String,
   override def prev: Int = cachedPrev
   override def setPrev(prev: Int): Unit = this.cachedPrev = prev
 
-  def this(topic: String, partition: Int) =
-    this(topic, partition, -1, -1, -1, Optional.empty(), -1, -1)
-
   def this(part: TopicPartition) =
-    this(part.topic, part.partition)
+    this(part, -1, -1, -1, Optional.empty(), -1, -1)
 
   def this(part: TopicPartition, reqData: FetchRequest.PartitionData) =
-    this(part.topic, part.partition, reqData.maxBytes, reqData.fetchOffset, -1,
+    this(part, reqData.maxBytes, reqData.fetchOffset, -1,
       reqData.currentLeaderEpoch, reqData.logStartOffset, -1)
 
   def this(part: TopicPartition, reqData: FetchRequest.PartitionData,
            respData: FetchResponse.PartitionData[Records]) =
-    this(part.topic, part.partition, reqData.maxBytes, reqData.fetchOffset, respData.highWatermark,
+    this(part, reqData.maxBytes, reqData.fetchOffset, respData.highWatermark,
       reqData.currentLeaderEpoch, reqData.logStartOffset, respData.logStartOffset)
 
   def reqData = new FetchRequest.PartitionData(fetchOffset, fetcherLogStartOffset, maxBytes, leaderEpoch)
@@ -156,7 +152,7 @@ class CachedPartition(val topic: String,
     mustRespond
   }
 
-  override def hashCode: Int = (31 * partition) + topic.hashCode
+  override def hashCode: Int = (31 * topicPartition.partition) + topicPartition.topic.hashCode
 
   def canEqual(that: Any) = that.isInstanceOf[CachedPartition]
 
@@ -165,14 +161,13 @@ class CachedPartition(val topic: String,
       case that: CachedPartition =>
         this.eq(that) ||
           (that.canEqual(this) &&
-            this.partition.equals(that.partition) &&
-            this.topic.equals(that.topic))
+            this.topicPartition.equals(that.topicPartition))
       case _ => false
     }
 
   override def toString: String = synchronized {
-    "CachedPartition(topic=" + topic +
-      ", partition=" + partition +
+    "CachedPartition(topic=" + topicPartition.topic +
+      ", partition=" + topicPartition.partition +
       ", maxBytes=" + maxBytes +
       ", fetchOffset=" + fetchOffset +
       ", highWatermark=" + highWatermark +
@@ -252,7 +247,7 @@ class FetchSession(val id: Int,
       }
     })
     toForget.iterator.asScala.foreach(p => {
-      if (partitionMap.remove(new CachedPartition(p.topic, p.partition))) {
+      if (partitionMap.remove(new CachedPartition(p))) {
         removed.add(p)
       }
     })
@@ -406,7 +401,7 @@ class IncrementalFetchContext(private val time: Time,
     // Take the session lock and iterate over all the cached partitions.
     session.synchronized {
       session.partitionMap.iterator.asScala.foreach { part =>
-        fun(new TopicPartition(part.topic, part.partition), part.reqData)
+        fun(part.topicPartition, part.reqData)
       }
     }
   }
