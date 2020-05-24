@@ -16,17 +16,14 @@
 from ducktape.mark import parametrize
 from ducktape.mark.resource import cluster
 from ducktape.utils.util import wait_until
-from kafkatest.services.console_consumer import ConsoleConsumer
 from kafkatest.services.kafka import KafkaService
 from kafkatest.services.kafka import config_property
-from kafkatest.services.verifiable_producer import VerifiableProducer
 from kafkatest.services.zookeeper import ZookeeperService
-from kafkatest.tests.produce_consume_validate import ProduceConsumeValidateTest
-from kafkatest.utils import is_int
+from kafkatest.tests.end_to_end import EndToEndTest
 from kafkatest.version import LATEST_0_8_2, LATEST_0_9, LATEST_0_10, LATEST_0_10_0, LATEST_0_10_1, LATEST_0_10_2, LATEST_0_11_0, LATEST_1_0, LATEST_1_1, LATEST_2_0, LATEST_2_1, LATEST_2_2, LATEST_2_3, LATEST_2_4, V_0_9_0_0, V_0_11_0_0, DEV_BRANCH, KafkaVersion
 from kafkatest.services.kafka.util import java_version, new_jdk_not_supported
 
-class TestUpgrade(ProduceConsumeValidateTest):
+class TestUpgrade(EndToEndTest):
 
     def __init__(self, test_context):
         super(TestUpgrade, self).__init__(test_context=test_context)
@@ -38,8 +35,6 @@ class TestUpgrade(ProduceConsumeValidateTest):
 
         # Producer and consumer
         self.producer_throughput = 1000
-        self.num_producers = 1
-        self.num_consumers = 1
 
     def wait_until_rejoin(self):
         for partition in range(0, self.partitions):
@@ -74,9 +69,12 @@ class TestUpgrade(ProduceConsumeValidateTest):
             self.kafka.start_node(node)
             self.wait_until_rejoin()
 
+
     @cluster(num_nodes=6)
-    @parametrize(from_kafka_version=str(LATEST_2_4), to_message_format_version=None, compression_types=["none"])
-    @parametrize(from_kafka_version=str(LATEST_2_4), to_message_format_version=None, compression_types=["zstd"])
+    @parametrize(from_kafka_version=str(LATEST_2_4), to_message_format_version=None, compression_types=["none"],
+            static_membership=True)
+    @parametrize(from_kafka_version=str(LATEST_2_4), to_message_format_version=None, compression_types=["zstd"],
+            static_membership=True)
     @parametrize(from_kafka_version=str(LATEST_2_3), to_message_format_version=None, compression_types=["none"])
     @parametrize(from_kafka_version=str(LATEST_2_3), to_message_format_version=None, compression_types=["zstd"])
     @parametrize(from_kafka_version=str(LATEST_2_2), to_message_format_version=None, compression_types=["none"])
@@ -110,7 +108,7 @@ class TestUpgrade(ProduceConsumeValidateTest):
     @parametrize(from_kafka_version=str(LATEST_0_8_2), to_message_format_version=None, compression_types=["none"])
     @parametrize(from_kafka_version=str(LATEST_0_8_2), to_message_format_version=None, compression_types=["snappy"])
     def test_upgrade(self, from_kafka_version, to_message_format_version, compression_types,
-                     security_protocol="PLAINTEXT"):
+                     security_protocol="PLAINTEXT", static_membership=False):
         """Test upgrade of Kafka broker cluster from various versions to the current version
 
         from_kafka_version is a Kafka version to upgrade from
@@ -147,11 +145,15 @@ class TestUpgrade(ProduceConsumeValidateTest):
         self.zk.start()
         self.kafka.start()
 
-        self.producer = VerifiableProducer(self.test_context, self.num_producers, self.kafka,
-                                           self.topic, throughput=self.producer_throughput,
-                                           message_validator=is_int,
-                                           compression_types=compression_types,
-                                           version=KafkaVersion(from_kafka_version))
+        self.create_producer(compression_types=compression_types,
+                             throughput=self.producer_throughput,
+                             version=from_kafka_version)
+        self.producer.start()
+
+        self.create_consumer(version=from_kafka_version,
+                             static_membership=static_membership)
+
+        self.consumer.start()
 
         if from_kafka_version <= LATEST_0_10_0:
             assert self.kafka.cluster_id() is None
@@ -160,14 +162,12 @@ class TestUpgrade(ProduceConsumeValidateTest):
         # after leader change. Tolerate limited data loss for this case to avoid transient test failures.
         self.may_truncate_acked_records = False if from_kafka_version >= V_0_11_0_0 else True
 
-        new_consumer = from_kafka_version >= V_0_9_0_0
-        # TODO - reduce the timeout
-        self.consumer = ConsoleConsumer(self.test_context, self.num_consumers, self.kafka,
-                                        self.topic, new_consumer=new_consumer, consumer_timeout_ms=30000,
-                                        message_validator=is_int, version=KafkaVersion(from_kafka_version))
+        self.perform_upgrade(from_kafka_version, to_message_format_version)
 
-        self.run_produce_consume_validate(core_test_action=lambda: self.perform_upgrade(from_kafka_version,
-                                                                                        to_message_format_version))
+        self.run_validation()
+
+        if from_kafka_version >= LATEST_0_11_0:
+            self.validate_epochs()
 
         cluster_id = self.kafka.cluster_id()
         assert cluster_id is not None

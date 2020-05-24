@@ -21,13 +21,11 @@ from kafkatest.services.kafka import config_property
 from kafkatest.services.zookeeper import ZookeeperService
 from kafkatest.services.kafka import KafkaService
 from kafkatest.services.verifiable_producer import VerifiableProducer
-from kafkatest.services.console_consumer import ConsoleConsumer
-from kafkatest.tests.produce_consume_validate import ProduceConsumeValidateTest
-from kafkatest.utils import is_int
+from kafkatest.tests.end_to_end import EndToEndTest
 import random
 import time
 
-class ReassignPartitionsTest(ProduceConsumeValidateTest):
+class ReassignPartitionsTest(EndToEndTest):
     """
     These tests validate partition reassignment.
     Create a topic with few partitions, load some data, trigger partition re-assignment with and without broker failure,
@@ -147,14 +145,15 @@ class ReassignPartitionsTest(ProduceConsumeValidateTest):
         if not reassign_from_offset_zero:
             self.move_start_offset()
 
-        self.producer = VerifiableProducer(self.test_context, self.num_producers,
-                                           self.kafka, self.topic,
-                                           throughput=self.producer_throughput,
-                                           enable_idempotence=True)
-        self.consumer = ConsoleConsumer(self.test_context, self.num_consumers,
-                                        self.kafka, self.topic,
-                                        consumer_timeout_ms=60000,
-                                        message_validator=is_int)
+        self.create_producer(enable_idempotence=True,
+                             throughput=self.producer_throughput)
+        self.producer.start()
 
-        self.enable_idempotence=True
-        self.run_produce_consume_validate(core_test_action=lambda: self.reassign_partitions(bounce_brokers))
+        self.create_consumer(static_membership=True)
+
+        self.consumer.start()
+
+        self.reassign_partitions(bounce_brokers)
+
+        self.run_validation(enable_idempotence=True, consumer_timeout_sec=60)
+        self.validate_epochs()

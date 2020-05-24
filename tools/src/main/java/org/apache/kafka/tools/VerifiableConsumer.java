@@ -360,7 +360,7 @@ public class VerifiableConsumer implements Closeable, OffsetCommitCallback, Cons
         }
     }
 
-    @JsonPropertyOrder({ "timestamp", "name", "key", "value", "topic", "partition", "offset" })
+    @JsonPropertyOrder({ "timestamp", "name", "key", "value", "topic", "partition", "offset", "leaderEpoch" })
     public static class RecordData extends ConsumerEvent {
 
         private final ConsumerRecord<String, String> record;
@@ -392,6 +392,11 @@ public class VerifiableConsumer implements Closeable, OffsetCommitCallback, Cons
         @JsonProperty
         public String value() {
             return record.value();
+        }
+
+        @JsonProperty
+        public Integer leaderEpoch() {
+            return record.leaderEpoch().orElse(-1);
         }
 
         @JsonProperty

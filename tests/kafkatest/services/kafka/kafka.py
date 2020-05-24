@@ -661,6 +661,17 @@ class KafkaService(KafkaPathResolverMixin, JmxMixin, Service):
         self.logger.debug("Verify partition reassignment:")
         self.logger.debug(output)
 
+    def topic_partition_leader_epochs(self, topic, partition):
+        leader_node = self.leader(topic, partition)
+        file = next(leader_node.account.ssh_capture("find %s* -regex '.*/%s-%s/leader-epoch-checkpoint'" %
+                    (KafkaService.DATA_LOG_DIR_PREFIX, topic, partition)))
+        output = list(leader_node.account.ssh_capture("cat %s" % file))
+        epochs = {}
+        for line in output[2:]:
+            epoch, offset = line.split()
+            epochs[int(epoch)] = int(offset)
+        return epochs
+
     def search_data_files(self, topic, messages):
         """Check if a set of messages made it into the Kakfa data files. Note that
         this method takes no account of replication. It simply looks for the

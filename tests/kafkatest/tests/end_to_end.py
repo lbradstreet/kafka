@@ -42,6 +42,9 @@ class EndToEndTest(Test):
         self.topic_config = topic_config
         self.records_consumed = []
         self.last_consumed_offsets = {}
+        self.leader_epochs = {}
+        # Allow tests to tolerate some data loss by overriding this for tests using older message formats
+        self.may_truncate_acked_records = False
         
     def create_zookeeper(self, num_nodes=1, **kwargs):
         self.zk = ZookeeperService(self.test_context, num_nodes=num_nodes, **kwargs)
@@ -79,11 +82,22 @@ class EndToEndTest(Test):
                                            **kwargs)
 
     def on_record_consumed(self, record, node):
-        partition = TopicPartition(record["topic"], record["partition"])
+        # topic is fixed, should match self.topic
+        topic = record["topic"]
+        partition = record["partition"]
+        topic_partition = TopicPartition(topic, partition)
         record_id = int(record["value"])
         offset = record["offset"]
-        self.last_consumed_offsets[partition] = offset
+        leader_epoch = record["leaderEpoch"]
+        self.last_consumed_offsets[topic_partition] = offset
         self.records_consumed.append(record_id)
+
+        if self.leader_epochs.get(partition) is None:
+            self.leader_epochs[partition] = {}
+
+        epoch_offset = self.leader_epochs[partition].get(leader_epoch)
+        if epoch_offset is None:
+            self.leader_epochs[partition][leader_epoch] = offset
 
     def await_consumed_offsets(self, last_acked_offsets, timeout_sec):
         def has_finished_consuming():
@@ -143,10 +157,16 @@ class EndToEndTest(Test):
             return self.kafka.search_data_files(self.topic, missing_records)
 
         succeeded, error_msg = validate_delivery(self.producer.acked, self.records_consumed,
-                                                 enable_idempotence, check_lost_data)
+                                                 enable_idempotence, check_lost_data,
+                                                 self.may_truncate_acked_records)
 
         # Collect all logs if validation fails
         if not succeeded:
             self._collect_all_logs()
 
         assert succeeded, error_msg
+
+    def validate_epochs(self):
+        for partition, consumer_epochs in self.leader_epochs.items():
+            dir_epochs = self.kafka.topic_partition_leader_epochs(self.topic, partition)
+            assert cmp(dir_epochs, consumer_epochs) == 0, "epochs for partition {} exposed to consumer {} differ to those on broker {}".format(partition, consumer_epochs, dir_epochs)
