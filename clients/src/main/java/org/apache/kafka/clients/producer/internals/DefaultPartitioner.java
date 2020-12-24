@@ -33,7 +33,11 @@ import java.util.Map;
  */
 public class DefaultPartitioner implements Partitioner {
 
-    private final StickyPartitionCache stickyPartitionCache = new StickyPartitionCache();
+    private final StickyPartitionCache stickyPartitionCache;
+
+    public DefaultPartitioner(Sender sender) {
+         stickyPartitionCache = new StickyPartitionCache(sender);
+    }
 
     public void configure(Map<String, ?> configs) {}
 

@@ -35,7 +35,7 @@ import org.apache.kafka.common.Cluster;
  */
 public class UniformStickyPartitioner implements Partitioner {
 
-    private final StickyPartitionCache stickyPartitionCache = new StickyPartitionCache();
+    private final StickyPartitionCache stickyPartitionCache = new StickyPartitionCache(null);
 
     public void configure(Map<String, ?> configs) {}
 

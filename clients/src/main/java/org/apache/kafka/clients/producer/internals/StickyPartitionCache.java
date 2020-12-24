@@ -19,10 +19,14 @@ package org.apache.kafka.clients.producer.internals;
 import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.PartitionInfo;
 
+import java.util.Comparator;
 import java.util.List;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.ConcurrentHashMap;
+
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.Utils;
 
 /**
@@ -31,8 +35,11 @@ import org.apache.kafka.common.utils.Utils;
  */
 public class StickyPartitionCache {
     private final ConcurrentMap<String, Integer> indexCache;
-    public StickyPartitionCache() {
+    private final Sender sender;
+
+    public StickyPartitionCache(Sender sender) {
         this.indexCache = new ConcurrentHashMap<>();
+        this.sender = sender;
     }
 
     public int partition(String topic, Cluster cluster) {
@@ -57,10 +64,26 @@ public class StickyPartitionCache {
             } else if (availablePartitions.size() == 1) {
                 newPart = availablePartitions.get(0).partition();
             } else {
+                // super inefficient approach
+                Optional<PartitionInfo> choice = availablePartitions.stream().min(new Comparator<PartitionInfo>() {
+                    @Override
+                    public int compare(PartitionInfo tp1, PartitionInfo tp2) {
+                        long o1NumInFlight = sender.numInFlightBatches(new TopicPartition(tp1.topic(), tp1.partition()));
+                        long o2NumInFlight = sender.numInFlightBatches(new TopicPartition(tp2.topic(), tp2.partition()));
+                        //System.out.println("num in flight " + tp1 + " " + o1NumInFlight + " tp 2" + " " + tp2 + " " + o2NumInFlight);
+                        return Double.compare(o1NumInFlight + ThreadLocalRandom.current().nextDouble(1), o2NumInFlight + ThreadLocalRandom.current().nextDouble(1));
+                    }
+                });
+
+                /*
                 while (newPart == null || newPart.equals(oldPart)) {
                     int random = Utils.toPositive(ThreadLocalRandom.current().nextInt());
                     newPart = availablePartitions.get(random % availablePartitions.size()).partition();
                 }
+                 */
+                //System.out.println("choice " + choice);
+                newPart = choice.get().partition();
+                //System.out.println("new partition " + newPart);
             }
             // Only change the sticky partition if it is null or prevPartition matches the current sticky partition.
             if (oldPart == null) {

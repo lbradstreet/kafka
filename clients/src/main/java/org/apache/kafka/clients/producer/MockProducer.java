@@ -120,7 +120,8 @@ public class MockProducer<K, V> implements Producer<K, V> {
     public MockProducer(final boolean autoComplete,
                         final Serializer<K> keySerializer,
                         final Serializer<V> valueSerializer) {
-        this(Cluster.empty(), autoComplete, new DefaultPartitioner(), keySerializer, valueSerializer);
+        this(Cluster.empty(), autoComplete, new DefaultPartitioner(null), keySerializer,
+                valueSerializer);
     }
 
     /**

@@ -42,7 +42,7 @@ public class DefaultPartitionerTest {
 
     @Test
     public void testKeyPartitionIsStable() {
-        final Partitioner partitioner = new DefaultPartitioner();
+        final Partitioner partitioner = new DefaultPartitioner(null);
         final Cluster cluster = new Cluster("clusterId", asList(NODES), PARTITIONS,
             Collections.<String>emptySet(), Collections.<String>emptySet());
         int partition = partitioner.partition("test",  null, KEY_BYTES, null, null, cluster);

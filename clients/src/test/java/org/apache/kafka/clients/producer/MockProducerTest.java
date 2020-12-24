@@ -85,7 +85,8 @@ public class MockProducerTest {
         PartitionInfo partitionInfo1 = new PartitionInfo(topic, 1, null, null, null);
         Cluster cluster = new Cluster(null, new ArrayList<>(0), asList(partitionInfo0, partitionInfo1),
                 Collections.emptySet(), Collections.emptySet());
-        MockProducer<String, String> producer = new MockProducer<>(cluster, true, new DefaultPartitioner(), new StringSerializer(), new StringSerializer());
+        MockProducer<String, String> producer = new MockProducer<>(cluster, true,
+                new DefaultPartitioner(null), new StringSerializer(), new StringSerializer());
         ProducerRecord<String, String> record = new ProducerRecord<>(topic, "key", "value");
         Future<RecordMetadata> metadata = producer.send(record);
         assertEquals("Partition should be correct", 1, metadata.get().partition());

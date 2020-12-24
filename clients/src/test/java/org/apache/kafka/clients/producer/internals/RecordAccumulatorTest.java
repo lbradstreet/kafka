@@ -901,7 +901,7 @@ public class RecordAccumulatorTest {
         // Test case assumes that the records do not fill the batch completely
         int batchSize = 1025;
 
-        Partitioner partitioner = new DefaultPartitioner();
+        Partitioner partitioner = new DefaultPartitioner(null);
         RecordAccumulator accum = createTestRecordAccumulator(3200,
                 batchSize + DefaultRecordBatch.RECORD_BATCH_OVERHEAD, 10L * batchSize, CompressionType.NONE, 10);
         int expectedAppends = expectedNumAppendsNoKey(batchSize);

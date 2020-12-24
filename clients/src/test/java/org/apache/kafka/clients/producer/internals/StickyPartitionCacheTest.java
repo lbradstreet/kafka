@@ -48,7 +48,7 @@ public class StickyPartitionCacheTest {
         );
         Cluster testCluster = new Cluster("clusterId", asList(NODES), allPartitions,
             Collections.emptySet(), Collections.emptySet());
-        StickyPartitionCache stickyPartitionCache = new StickyPartitionCache();
+        StickyPartitionCache stickyPartitionCache = new StickyPartitionCache(null);
 
         int partA = stickyPartitionCache.partition(TOPIC_A, testCluster);
         assertEquals(partA, stickyPartitionCache.partition(TOPIC_A, testCluster));
@@ -84,7 +84,7 @@ public class StickyPartitionCacheTest {
         
         Cluster testCluster = new Cluster("clusterId", asList(NODES[0], NODES[1], NODES[2]), allPartitions,
             Collections.emptySet(), Collections.emptySet());
-        StickyPartitionCache stickyPartitionCache = new StickyPartitionCache();
+        StickyPartitionCache stickyPartitionCache = new StickyPartitionCache(null);
         
         // Assure we never choose partition 1 because it is unavailable.
         int partA = stickyPartitionCache.partition(TOPIC_A, testCluster);

@@ -60,6 +60,8 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 import static org.apache.kafka.common.record.RecordBatch.NO_TIMESTAMP;
@@ -119,6 +121,7 @@ public class Sender implements Runnable {
 
     // A per-partition queue of batches ordered by creation time for tracking the in-flight batches
     private final Map<TopicPartition, List<ProducerBatch>> inFlightBatches;
+    private final ConcurrentHashMap<TopicPartition, AtomicInteger> numBatches;
 
     public Sender(LogContext logContext,
                   KafkaClient client,
@@ -150,10 +153,17 @@ public class Sender implements Runnable {
         this.apiVersions = apiVersions;
         this.transactionManager = transactionManager;
         this.inFlightBatches = new HashMap<>();
+        this.numBatches = new ConcurrentHashMap<>();
     }
 
     public List<ProducerBatch> inFlightBatches(TopicPartition tp) {
         return inFlightBatches.containsKey(tp) ? inFlightBatches.get(tp) : new ArrayList<>();
+    }
+
+    public Integer numInFlightBatches(TopicPartition topicPartition) {
+        AtomicInteger v = numBatches.get(topicPartition);
+        if (v == null) return 0;
+        return v.get();
     }
 
     private void maybeRemoveFromInflightBatches(ProducerBatch batch) {
@@ -162,6 +172,7 @@ public class Sender implements Runnable {
             batches.remove(batch);
             if (batches.isEmpty()) {
                 inFlightBatches.remove(batch.topicPartition);
+                numBatches.remove(batch.topicPartition);
             }
         }
     }
@@ -215,6 +226,7 @@ public class Sender implements Runnable {
                 inflightBatchList = new ArrayList<>();
                 inFlightBatches.put(batch.topicPartition, inflightBatchList);
             }
+            numBatches.computeIfAbsent(batch.topicPartition, topicPartition -> new AtomicInteger(0)).incrementAndGet();
             inflightBatchList.add(batch);
         }
     }
