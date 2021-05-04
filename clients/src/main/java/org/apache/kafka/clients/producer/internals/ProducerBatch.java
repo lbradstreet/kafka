@@ -170,7 +170,7 @@ public final class ProducerBatch {
     }
 
     public String toStringVerbose() {
-        return(String.format("ProducerBatch: %s: finalState: %s queue time: %s creation until "
+        return String.format("ProducerBatch: %s: finalState: %s queue time: %s creation until "
                         + "done: %s retried %s attempts %s reopened %s records: %s "
                         + "logAppendTime: %s "
                         + "exceptional %s firedCallback %s",
@@ -184,7 +184,7 @@ public final class ProducerBatch {
                 recordCount,
                 logAppendTime,
                 exceptional,
-                firedCallback));
+                firedCallback);
     }
 
     /**
