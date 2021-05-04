@@ -219,7 +219,7 @@ public final class ProducerBatch {
         }
 
         exceptional = exception != null;
-        doneTime = System.currentTimeMillis()
+        doneTime = System.currentTimeMillis();
         this.logAppendTime = logAppendTime;
 
         if (this.finalState.compareAndSet(null, tryFinalState)) {
