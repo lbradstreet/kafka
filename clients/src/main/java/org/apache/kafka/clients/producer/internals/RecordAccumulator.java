@@ -23,6 +23,7 @@ import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -710,8 +711,19 @@ public final class RecordAccumulator {
      */
     public void awaitFlushCompletion() throws InterruptedException {
         try {
-            for (ProducerBatch batch : this.incomplete.copyAll())
+            long startTime = System.currentTimeMillis();
+            Iterable<ProducerBatch> iterable = this.incomplete.copyAll();
+            for (ProducerBatch batch : iterable)
                 batch.produceFuture.await();
+
+            StringBuilder fullFlush =
+                    new StringBuilder("KafkaProducer.flush took " + (System.currentTimeMillis() - startTime) + "ms."
+                            + " Batches: ");
+            for (ProducerBatch batch : iterable) {
+                fullFlush.append(batch.toStringVerbose()).append(", ");
+            }
+
+            log.info(fullFlush.toString());
         } finally {
             this.flushesInProgress.decrementAndGet();
         }

@@ -74,6 +74,9 @@ public final class ProducerBatch {
     private long lastAttemptMs;
     private long lastAppendTime;
     private long drainedMs;
+    private long logAppendTime;
+    private boolean exceptional;
+    private boolean firedCallback;
     private boolean retry;
     private boolean reopened;
 
@@ -166,6 +169,24 @@ public final class ProducerBatch {
         return finalState() != null;
     }
 
+    public String toStringVerbose() {
+        return(String.format("ProducerBatch: %s: finalState: %s queue time: %s creation until "
+                        + "done: %s retried %s attempts %s reopened %s records: %s "
+                        + "logAppendTime: %s "
+                        + "exceptional %s firedCallback %s",
+                topicPartition,
+                this.finalState.get(),
+                queueTimeMs(),
+                System.currentTimeMillis() - createdMs,
+                retry,
+                attempts.get(),
+                reopened,
+                recordCount,
+                logAppendTime,
+                exceptional,
+                firedCallback));
+    }
+
     /**
      * Finalize the state of a batch. Final state, once set, is immutable. This function may be called
      * once or twice on a batch. It may be called twice if
@@ -193,22 +214,12 @@ public final class ProducerBatch {
             log.trace("Failed to produce messages to {} with base offset {}.", topicPartition, baseOffset, exception);
         }
 
-        log.info("ProduceResponse: {}: finalState {}, queue time {}, creation until done {} log "
-                        + "append time {} retried {} attempts {} reopened {}, records {}, "
-                        + "exception {}",
-                topicPartition,
-                this.finalState.get(),
-                queueTimeMs(),
-                (System.currentTimeMillis() - createdMs),
-                logAppendTime,
-                retry,
-                attempts.get(),
-                reopened,
-                recordCount,
-                exception != null);
+        exceptional = exception != null;
+        this.logAppendTime = logAppendTime;
 
         if (this.finalState.compareAndSet(null, tryFinalState)) {
             completeFutureAndFireCallbacks(baseOffset, logAppendTime, exception);
+            firedCallback = true;
             return true;
         }
 
