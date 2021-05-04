@@ -76,6 +76,7 @@ public final class ProducerBatch {
     private long lastAppendTime;
     private long drainedMs;
     private long logAppendTime;
+    private long doneTime;
     private boolean exceptional;
     private boolean firedCallback;
     private boolean retry;
@@ -180,7 +181,7 @@ public final class ProducerBatch {
                 drainedNode,
                 this.finalState.get(),
                 queueTimeMs(),
-                System.currentTimeMillis() - createdMs,
+                doneTime - createdMs,
                 retry,
                 attempts.get(),
                 reopened,
@@ -218,6 +219,7 @@ public final class ProducerBatch {
         }
 
         exceptional = exception != null;
+        doneTime = System.currentTimeMillis()
         this.logAppendTime = logAppendTime;
 
         if (this.finalState.compareAndSet(null, tryFinalState)) {
