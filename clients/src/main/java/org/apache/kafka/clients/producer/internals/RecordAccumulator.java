@@ -604,7 +604,7 @@ public final class RecordAccumulator {
                     size += batch.records().sizeInBytes();
                     ready.add(batch);
 
-                    batch.drained(now);
+                    batch.drained(now, node);
                 }
             }
         } while (start != drainIndex);

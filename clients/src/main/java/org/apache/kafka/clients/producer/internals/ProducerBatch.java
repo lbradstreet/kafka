@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.producer.internals;
 
 import org.apache.kafka.clients.producer.Callback;
+import org.apache.kafka.common.Node;
 import org.apache.kafka.common.utils.ProducerIdAndEpoch;
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.common.TopicPartition;
@@ -79,6 +80,7 @@ public final class ProducerBatch {
     private boolean firedCallback;
     private boolean retry;
     private boolean reopened;
+    private Node drainedNode = null;
 
     public ProducerBatch(TopicPartition tp, MemoryRecordsBuilder recordsBuilder, long createdMs) {
         this(tp, recordsBuilder, createdMs, false);
@@ -170,11 +172,12 @@ public final class ProducerBatch {
     }
 
     public String toStringVerbose() {
-        return String.format("ProducerBatch: %s: finalState: %s queue time: %s creation until "
+        return String.format("ProducerBatch: %s@%s: finalState: %s queue time: %s creation until "
                         + "done: %s retried %s attempts %s reopened %s records: %s "
                         + "logAppendTime: %s "
                         + "exceptional %s firedCallback %s",
                 topicPartition,
+                drainedNode,
                 this.finalState.get(),
                 queueTimeMs(),
                 System.currentTimeMillis() - createdMs,
@@ -381,8 +384,9 @@ public final class ProducerBatch {
         return Math.max(0, nowMs - lastAttemptMs);
     }
 
-    void drained(long nowMs) {
+    void drained(long nowMs, Node node) {
         this.drainedMs = Math.max(drainedMs, nowMs);
+        this.drainedNode = node;
     }
 
     boolean isSplitBatch() {
