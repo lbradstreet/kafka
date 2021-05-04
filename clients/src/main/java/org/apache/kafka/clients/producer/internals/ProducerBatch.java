@@ -193,6 +193,20 @@ public final class ProducerBatch {
             log.trace("Failed to produce messages to {} with base offset {}.", topicPartition, baseOffset, exception);
         }
 
+        log.info("ProduceResponse: {}: finalState {}, queue time {}, creation until done {} log "
+                        + "append time {} retried {} attempts {} reopened {}, records {}, "
+                        + "exception {}",
+                topicPartition,
+                this.finalState.get(),
+                queueTimeMs(),
+                (System.currentTimeMillis() - createdMs),
+                logAppendTime,
+                retry,
+                attempts.get(),
+                reopened,
+                recordCount,
+                exception != null);
+
         if (this.finalState.compareAndSet(null, tryFinalState)) {
             completeFutureAndFireCallbacks(baseOffset, logAppendTime, exception);
             return true;
