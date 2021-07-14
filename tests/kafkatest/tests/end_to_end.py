@@ -41,6 +41,7 @@ class EndToEndTest(Test):
         self.records_consumed = []
         self.last_consumed_offsets = {}
         self.leader_epochs = {}
+        self.record_offset_and_epochs = {}
         # Allow tests to tolerate some data loss by overriding this for tests using older message formats
         self.may_truncate_acked_records = False
         
@@ -92,6 +93,12 @@ class EndToEndTest(Test):
 
         if self.leader_epochs.get(partition) is None:
             self.leader_epochs[partition] = {}
+
+
+        if self.record_offset_and_epochs.get(partition) is None:
+            self.record_offset_and_epochs[partition] = set({})
+
+        self.record_offset_and_epochs[partition].add((offset, leader_epoch))
 
         epoch_offset = self.leader_epochs[partition].get(leader_epoch)
         if epoch_offset is None:
@@ -165,6 +172,11 @@ class EndToEndTest(Test):
         assert succeeded, error_msg
 
     def validate_epochs(self):
+        for partition, consumer_epochs in self.record_offset_and_epochs.items():
+            offsets = [x[0] for x in consumer_epochs]
+            assert len(set(offsets)) == len(consumer_epochs), "there should be no offset overlap with identical epochs {}".format(consumer_epochs)
+
         for partition, consumer_epochs in self.leader_epochs.items():
+            print(consumer_epochs)
             dir_epochs = self.kafka.topic_partition_leader_epochs(self.topic, partition)
-            assert cmp(dir_epochs, consumer_epochs) == 0, "epochs for partition {} exposed to consumer {} differ to those on broker {}".format(partition, consumer_epochs, dir_epochs)
+            assert dir_epochs == consumer_epochs, "epochs for partition {} exposed to consumer {} differ to those on broker {}".format(partition, consumer_epochs, dir_epochs)
