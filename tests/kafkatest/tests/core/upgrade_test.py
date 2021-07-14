@@ -20,8 +20,10 @@ from kafkatest.services.kafka import KafkaService
 from kafkatest.services.kafka import config_property
 from kafkatest.services.zookeeper import ZookeeperService
 from kafkatest.tests.end_to_end import EndToEndTest
-from kafkatest.version import LATEST_0_8_2, LATEST_0_9, LATEST_0_10, LATEST_0_10_0, LATEST_0_10_1, LATEST_0_10_2, LATEST_0_11_0, LATEST_1_0, LATEST_1_1, LATEST_2_0, LATEST_2_1, LATEST_2_2, LATEST_2_3, LATEST_2_4, V_0_9_0_0, V_0_11_0_0, DEV_BRANCH, KafkaVersion
-from kafkatest.services.kafka.util import java_version, new_jdk_not_supported
+from kafkatest.utils import is_int
+from kafkatest.utils.remote_account import java_version
+from kafkatest.version import LATEST_0_8_2, LATEST_0_9, LATEST_0_10, LATEST_0_10_0, LATEST_0_10_1, LATEST_0_10_2, LATEST_0_11_0, LATEST_1_0, LATEST_1_1, LATEST_2_0, LATEST_2_1, LATEST_2_2, LATEST_2_3, LATEST_2_4, LATEST_2_5, LATEST_2_6, LATEST_2_7, LATEST_2_8, V_0_11_0_0, V_2_8_0, DEV_BRANCH, KafkaVersion
+from kafkatest.services.kafka.util import new_jdk_not_supported
 
 class TestUpgrade(EndToEndTest):
 
@@ -45,11 +47,23 @@ class TestUpgrade(EndToEndTest):
         self.logger.info("Upgrade ZooKeeper from %s to %s" % (str(self.zk.nodes[0].version), str(DEV_BRANCH)))
         self.zk.set_version(DEV_BRANCH)
         self.zk.restart_cluster()
-        # Confirm we have a successful ZoKeeper upgrade by describing the topic.
+        # Confirm we have a successful ZooKeeper upgrade by describing the topic.
         # Not trying to detect a problem here leads to failure in the ensuing Kafka roll, which would be a less
         # intuitive failure than seeing a problem here, so detect ZooKeeper upgrade problems before involving Kafka.
         self.zk.describe(self.topic)
-        self.logger.info("First pass bounce - rolling upgrade")
+        # Do some stuff that exercises the use of ZooKeeper before we upgrade to the latest ZooKeeper client version
+        self.logger.info("First pass bounce - rolling Kafka with old ZooKeeper client")
+        for node in self.kafka.nodes:
+            self.kafka.restart_node(node)
+        topic_cfg = {
+            "topic": "another_topic",
+            "partitions": self.partitions,
+            "replication-factor": self.replication_factor,
+            "configs": {"min.insync.replicas": 2}
+        }
+        self.kafka.create_topic(topic_cfg)
+
+        self.logger.info("Second pass bounce - rolling upgrade")
         for node in self.kafka.nodes:
             self.kafka.stop_node(node)
             node.version = DEV_BRANCH
@@ -58,7 +72,7 @@ class TestUpgrade(EndToEndTest):
             self.kafka.start_node(node)
             self.wait_until_rejoin()
 
-        self.logger.info("Second pass bounce - remove inter.broker.protocol.version config")
+        self.logger.info("Third pass bounce - remove inter.broker.protocol.version config")
         for node in self.kafka.nodes:
             self.kafka.stop_node(node)
             del node.config[config_property.INTER_BROKER_PROTOCOL_VERSION]
@@ -69,12 +83,20 @@ class TestUpgrade(EndToEndTest):
             self.kafka.start_node(node)
             self.wait_until_rejoin()
 
-
     @cluster(num_nodes=6)
-    @parametrize(from_kafka_version=str(LATEST_2_4), to_message_format_version=None, compression_types=["none"],
-            static_membership=True)
-    @parametrize(from_kafka_version=str(LATEST_2_4), to_message_format_version=None, compression_types=["zstd"],
-            static_membership=True)
+    @parametrize(from_kafka_version=str(LATEST_2_8), to_message_format_version=None, compression_types=["none"])
+    @parametrize(from_kafka_version=str(LATEST_2_8), to_message_format_version=None, compression_types=["lz4"])
+    @parametrize(from_kafka_version=str(LATEST_2_8), to_message_format_version=None, compression_types=["snappy"])
+    @parametrize(from_kafka_version=str(LATEST_2_7), to_message_format_version=None, compression_types=["none"])
+    @parametrize(from_kafka_version=str(LATEST_2_7), to_message_format_version=None, compression_types=["lz4"])
+    @parametrize(from_kafka_version=str(LATEST_2_7), to_message_format_version=None, compression_types=["snappy"])
+    @parametrize(from_kafka_version=str(LATEST_2_6), to_message_format_version=None, compression_types=["none"])
+    @parametrize(from_kafka_version=str(LATEST_2_6), to_message_format_version=None, compression_types=["lz4"])
+    @parametrize(from_kafka_version=str(LATEST_2_6), to_message_format_version=None, compression_types=["snappy"])
+    @parametrize(from_kafka_version=str(LATEST_2_5), to_message_format_version=None, compression_types=["none"])
+    @parametrize(from_kafka_version=str(LATEST_2_5), to_message_format_version=None, compression_types=["zstd"])
+    @parametrize(from_kafka_version=str(LATEST_2_4), to_message_format_version=None, compression_types=["none"])
+    @parametrize(from_kafka_version=str(LATEST_2_4), to_message_format_version=None, compression_types=["zstd"])
     @parametrize(from_kafka_version=str(LATEST_2_3), to_message_format_version=None, compression_types=["none"])
     @parametrize(from_kafka_version=str(LATEST_2_3), to_message_format_version=None, compression_types=["zstd"])
     @parametrize(from_kafka_version=str(LATEST_2_2), to_message_format_version=None, compression_types=["none"])
@@ -128,8 +150,9 @@ class TestUpgrade(EndToEndTest):
         - Finally, validate that every message acked by the producer was consumed by the consumer
         """
         self.zk = ZookeeperService(self.test_context, num_nodes=1, version=KafkaVersion(from_kafka_version))
+        fromKafkaVersion = KafkaVersion(from_kafka_version)
         self.kafka = KafkaService(self.test_context, num_nodes=3, zk=self.zk,
-                                  version=KafkaVersion(from_kafka_version),
+                                  version=fromKafkaVersion,
                                   topics={self.topic: {"partitions": self.partitions,
                       "replication-factor": self.replication_factor,
                       'configs': {"min.insync.replicas": 2}}})
@@ -145,15 +168,13 @@ class TestUpgrade(EndToEndTest):
         self.zk.start()
         self.kafka.start()
 
-        self.create_producer(compression_types=compression_types,
-                             throughput=self.producer_throughput,
-                             version=from_kafka_version)
-        self.producer.start()
+        old_id = self.kafka.topic_id(self.topic)
 
-        self.create_consumer(version=from_kafka_version,
-                             static_membership=static_membership)
-
-        self.consumer.start()
+        self.producer = VerifiableProducer(self.test_context, self.num_producers, self.kafka,
+                                           self.topic, throughput=self.producer_throughput,
+                                           message_validator=is_int,
+                                           compression_types=compression_types,
+                                           version=KafkaVersion(from_kafka_version))
 
         if from_kafka_version <= LATEST_0_10_0:
             assert self.kafka.cluster_id() is None
@@ -162,9 +183,11 @@ class TestUpgrade(EndToEndTest):
         # after leader change. Tolerate limited data loss for this case to avoid transient test failures.
         self.may_truncate_acked_records = False if from_kafka_version >= V_0_11_0_0 else True
 
-        self.perform_upgrade(from_kafka_version, to_message_format_version)
-
-        self.run_validation()
+        new_consumer = fromKafkaVersion.consumer_supports_bootstrap_server()
+        # TODO - reduce the timeout
+        self.consumer = ConsoleConsumer(self.test_context, self.num_consumers, self.kafka,
+                                        self.topic, new_consumer=new_consumer, consumer_timeout_ms=30000,
+                                        message_validator=is_int, version=KafkaVersion(from_kafka_version))
 
         if from_kafka_version >= LATEST_0_11_0:
             self.validate_epochs()
@@ -172,5 +195,15 @@ class TestUpgrade(EndToEndTest):
         cluster_id = self.kafka.cluster_id()
         assert cluster_id is not None
         assert len(cluster_id) == 22
+
+        assert self.kafka.all_nodes_support_topic_ids()
+        new_id = self.kafka.topic_id(self.topic)
+        if from_kafka_version >= V_2_8_0:
+            assert old_id is not None
+            assert new_id is not None
+            assert old_id == new_id
+        else:
+            assert old_id is None
+            assert new_id is not None
 
         assert self.kafka.check_protocol_errors(self)

@@ -22,6 +22,7 @@ import static java.time.Duration.ofMillis;
 import static org.apache.kafka.streams.EqualityCheck.verifyEquality;
 import static org.apache.kafka.streams.EqualityCheck.verifyInEquality;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.fail;
 
 @SuppressWarnings("deprecation")
@@ -30,7 +31,11 @@ public class SessionWindowsTest {
     @Test
     public void shouldSetWindowGap() {
         final long anyGap = 42L;
+        final long anyGrace = 1024L;
+
         assertEquals(anyGap, SessionWindows.with(ofMillis(anyGap)).inactivityGap());
+        assertEquals(anyGap, SessionWindows.ofInactivityGapWithNoGrace(ofMillis(anyGap)).inactivityGap());
+        assertEquals(anyGap, SessionWindows.ofInactivityGapAndGrace(ofMillis(anyGap), ofMillis(anyGrace)).inactivityGap());
     }
 
     @Test
@@ -52,38 +57,28 @@ public class SessionWindowsTest {
         }
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void windowSizeMustNotBeNegative() {
-        SessionWindows.with(ofMillis(-1));
+        assertThrows(IllegalArgumentException.class, () -> SessionWindows.with(ofMillis(-1)));
     }
 
-    @Test(expected = IllegalArgumentException.class)
+    @Test
     public void windowSizeMustNotBeZero() {
-        SessionWindows.with(ofMillis(0));
-    }
-
-    @SuppressWarnings("deprecation") // specifically testing deprecated apis
-    @Test
-    public void retentionTimeShouldBeGapIfGapIsLargerThanDefaultRetentionTime() {
-        final long windowGap = 2 * SessionWindows.with(ofMillis(1)).maintainMs();
-        assertEquals(windowGap, SessionWindows.with(ofMillis(windowGap)).maintainMs());
-    }
-
-    @Deprecated
-    @Test
-    public void retentionTimeMustNotBeNegative() {
-        final SessionWindows windowSpec = SessionWindows.with(ofMillis(42));
-        try {
-            windowSpec.until(41);
-            fail("should not accept retention time smaller than gap");
-        } catch (final IllegalArgumentException e) {
-            // expected
-        }
+        assertThrows(IllegalArgumentException.class, () -> SessionWindows.with(ofMillis(0)));
     }
 
     @Test
     public void equalsAndHashcodeShouldBeValidForPositiveCases() {
         verifyEquality(SessionWindows.with(ofMillis(1)), SessionWindows.with(ofMillis(1)));
+
+        verifyEquality(SessionWindows.ofInactivityGapWithNoGrace(ofMillis(1)),
+                SessionWindows.ofInactivityGapWithNoGrace(ofMillis(1))
+        );
+
+        verifyEquality(
+                SessionWindows.ofInactivityGapAndGrace(ofMillis(1), ofMillis(11)),
+                SessionWindows.ofInactivityGapAndGrace(ofMillis(1), ofMillis(11))
+        );
 
         verifyEquality(SessionWindows.with(ofMillis(1)).grace(ofMillis(6)), SessionWindows.with(ofMillis(1)).grace(ofMillis(6)));
 
@@ -94,6 +89,15 @@ public class SessionWindowsTest {
 
     @Test
     public void equalsAndHashcodeShouldBeValidForNegativeCases() {
+
+        verifyInEquality(
+                SessionWindows.ofInactivityGapWithNoGrace(ofMillis(9)),
+                SessionWindows.ofInactivityGapWithNoGrace(ofMillis(1)));
+
+        verifyInEquality(
+                SessionWindows.ofInactivityGapAndGrace(ofMillis(9), ofMillis(9)),
+                SessionWindows.ofInactivityGapAndGrace(ofMillis(1), ofMillis(9)));
+
         verifyInEquality(SessionWindows.with(ofMillis(9)), SessionWindows.with(ofMillis(1)));
 
         verifyInEquality(SessionWindows.with(ofMillis(1)).grace(ofMillis(9)), SessionWindows.with(ofMillis(1)).grace(ofMillis(6)));

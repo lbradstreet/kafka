@@ -24,13 +24,13 @@ import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.KeyValueTimestamp;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.streams.TopologyTestDriver;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.Grouped;
 import org.apache.kafka.streams.kstream.KTable;
 import org.apache.kafka.streams.kstream.Materialized;
 import org.apache.kafka.streams.state.KeyValueStore;
-import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.test.MockAggregator;
 import org.apache.kafka.test.MockInitializer;
 import org.apache.kafka.test.MockMapper;
@@ -38,6 +38,7 @@ import org.apache.kafka.test.MockProcessor;
 import org.apache.kafka.test.MockProcessorSupplier;
 import org.apache.kafka.test.TestUtils;
 import org.junit.Test;
+import java.util.Properties;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -48,11 +49,14 @@ import static org.apache.kafka.common.utils.Utils.mkMap;
 import static org.apache.kafka.common.utils.Utils.mkProperties;
 import static org.junit.Assert.assertEquals;
 
+@SuppressWarnings("deprecation") // Old PAPI. Needs to be migrated.
 public class KTableAggregateTest {
     private final Serde<String> stringSerde = Serdes.String();
     private final Consumed<String, String> consumed = Consumed.with(stringSerde, stringSerde);
     private final Grouped<String, String> stringSerialized = Grouped.with(stringSerde, stringSerde);
     private final MockProcessorSupplier<String, Object> supplier = new MockProcessorSupplier<>();
+    private final static Properties CONFIG = mkProperties(mkMap(
+        mkEntry(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory("kafka-test").getAbsolutePath())));
 
     @Test
     public void testAggBasic() {
@@ -75,13 +79,7 @@ public class KTableAggregateTest {
 
         try (
             final TopologyTestDriver driver = new TopologyTestDriver(
-                builder.build(),
-                mkProperties(mkMap(
-                    mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "dummy"),
-                    mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, "test"),
-                    mkEntry(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory("kafka-test").getAbsolutePath())
-                )),
-                Instant.ofEpochMilli(0L))) {
+                builder.build(), CONFIG, Instant.ofEpochMilli(0L))) {
             final TestInputTopic<String, String> inputTopic =
                 driver.createInputTopic(topic1, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
 
@@ -108,7 +106,7 @@ public class KTableAggregateTest {
                     new KeyValueTimestamp<>("B", "0+2-2+4-4+7", 18L),
                     new KeyValueTimestamp<>("C", "0+5-5", 10L),
                     new KeyValueTimestamp<>("C", "0+5-5+8", 10L)),
-                supplier.theCapturedProcessor().processed);
+                supplier.theCapturedProcessor().processed());
         }
     }
 
@@ -142,13 +140,7 @@ public class KTableAggregateTest {
 
         try (
             final TopologyTestDriver driver = new TopologyTestDriver(
-                builder.build(),
-                mkProperties(mkMap(
-                    mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "dummy"),
-                    mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, "test"),
-                    mkEntry(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory("kafka-test").getAbsolutePath())
-                )),
-                Instant.ofEpochMilli(0L))) {
+                builder.build(), CONFIG, Instant.ofEpochMilli(0L))) {
             final TestInputTopic<String, String> inputTopic =
                 driver.createInputTopic(topic1, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
 
@@ -171,7 +163,7 @@ public class KTableAggregateTest {
                         new KeyValueTimestamp<>("4", "0+4", 23),
                         new KeyValueTimestamp<>("4", "0+4-4", 23),
                         new KeyValueTimestamp<>("7", "0+7", 22)),
-                supplier.theCapturedProcessor().processed);
+                supplier.theCapturedProcessor().processed());
         }
     }
 
@@ -180,13 +172,7 @@ public class KTableAggregateTest {
                                         final MockProcessorSupplier<String, Object> supplier) {
         try (
             final TopologyTestDriver driver = new TopologyTestDriver(
-                builder.build(),
-                mkProperties(mkMap(
-                    mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "dummy"),
-                    mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, "test"),
-                    mkEntry(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory("kafka-test").getAbsolutePath())
-                )),
-                Instant.ofEpochMilli(0L))) {
+                builder.build(), CONFIG, Instant.ofEpochMilli(0L))) {
             final TestInputTopic<String, String> inputTopic =
                 driver.createInputTopic(input, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
 
@@ -204,7 +190,7 @@ public class KTableAggregateTest {
                     new KeyValueTimestamp<>("blue", 1L, 12),
                     new KeyValueTimestamp<>("yellow", 1L, 15),
                     new KeyValueTimestamp<>("green", 2L, 12)),
-                supplier.theCapturedProcessor().processed);
+                supplier.theCapturedProcessor().processed());
         }
     }
 
@@ -263,13 +249,7 @@ public class KTableAggregateTest {
 
         try (
             final TopologyTestDriver driver = new TopologyTestDriver(
-                builder.build(),
-                mkProperties(mkMap(
-                    mkEntry(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "dummy"),
-                    mkEntry(StreamsConfig.APPLICATION_ID_CONFIG, "test"),
-                    mkEntry(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory("kafka-test").getAbsolutePath())
-                )),
-                Instant.ofEpochMilli(0L))) {
+                builder.build(), CONFIG, Instant.ofEpochMilli(0L))) {
             final TestInputTopic<String, String> inputTopic =
                 driver.createInputTopic(input, new StringSerializer(), new StringSerializer(), Instant.ofEpochMilli(0L), Duration.ZERO);
 
@@ -288,7 +268,7 @@ public class KTableAggregateTest {
                     new KeyValueTimestamp<>("1", "", 12),
                     new KeyValueTimestamp<>("1", "2", 12L)
                 ),
-                proc.processed
+                proc.processed()
             );
         }
     }

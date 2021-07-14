@@ -16,15 +16,7 @@
  */
 package org.apache.kafka.connect.util.clusters;
 
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-
 import org.apache.kafka.clients.admin.TopicDescription;
-import org.apache.kafka.clients.consumer.Consumer;
-import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.connect.runtime.AbstractStatus;
 import org.apache.kafka.connect.runtime.rest.entities.ActiveTopicsInfo;
 import org.apache.kafka.connect.runtime.rest.entities.ConnectorStateInfo;
@@ -33,17 +25,18 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import javax.ws.rs.core.Response;
+import java.util.Arrays;
 import java.util.Collection;
+import java.util.HashSet;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
 
 import static org.apache.kafka.test.TestUtils.waitForCondition;
-import static org.junit.Assert.assertEquals;
 
 /**
  * A set of common assertions that can be applied to a Connect cluster during integration testing
@@ -53,7 +46,7 @@ public class EmbeddedConnectClusterAssertions {
     private static final Logger log = LoggerFactory.getLogger(EmbeddedConnectClusterAssertions.class);
     public static final long WORKER_SETUP_DURATION_MS = TimeUnit.SECONDS.toMillis(60);
     public static final long VALIDATION_DURATION_MS = TimeUnit.SECONDS.toMillis(30);
-    private static final long CONNECTOR_SETUP_DURATION_MS = TimeUnit.SECONDS.toMillis(30);
+    public static final long CONNECTOR_SETUP_DURATION_MS = TimeUnit.SECONDS.toMillis(30);
     private static final long CONNECT_INTERNAL_TOPIC_UPDATES_DURATION_MS = TimeUnit.SECONDS.toMillis(60);
 
     private final EmbeddedConnectCluster connect;
@@ -155,7 +148,7 @@ public class EmbeddedConnectClusterAssertions {
                 existingTopics.set(actual);
                 return actual.isEmpty();
             }).orElse(false),
-            WORKER_SETUP_DURATION_MS,
+            CONNECTOR_SETUP_DURATION_MS,
             "Unexpectedly found topics " + existingTopics.get());
     }
 
@@ -174,7 +167,7 @@ public class EmbeddedConnectClusterAssertions {
                 missingTopics.set(missing);
                 return missing.isEmpty();
             }).orElse(false),
-            WORKER_SETUP_DURATION_MS,
+            CONNECTOR_SETUP_DURATION_MS,
             "Didn't find the topics " + missingTopics.get());
     }
 
@@ -188,7 +181,7 @@ public class EmbeddedConnectClusterAssertions {
                                                      .collect(Collectors.toSet());
             return Optional.of(comp.apply(actualExistingTopics, topicNames));
         } catch (Exception e) {
-            log.error("Could not check config validation error count.", e);
+            log.error("Failed to describe the topic(s): {}.", topicNames, e);
             return Optional.empty();
         }
     }
@@ -200,16 +193,38 @@ public class EmbeddedConnectClusterAssertions {
      * @param topicName  the name of the topic that is expected to exist
      * @param replicas   the replication factor
      * @param partitions the number of partitions
+     * @param detailMessage the assertion message
      */
-    public void assertTopicSettings(String topicName, int replicas, int partitions) {
-        Map<String, Object> consumerProps = Collections.singletonMap("group.id", UUID.randomUUID().toString());
-        try (Consumer<byte[], byte[]> verifiableConsumer = connect.kafka().createConsumer(consumerProps);) {
-            List<PartitionInfo> infos = verifiableConsumer.partitionsFor(topicName);
-            assertEquals(partitions, infos.size());
-            for (PartitionInfo info : infos) {
-                assertEquals(topicName, info.topic());
-                assertEquals(replicas, info.replicas().length);
-            }
+    public void assertTopicSettings(String topicName, int replicas, int partitions, String detailMessage)
+            throws InterruptedException {
+        try {
+            waitForCondition(
+                () -> checkTopicSettings(
+                    topicName,
+                    replicas,
+                    partitions
+                ).orElse(false),
+                VALIDATION_DURATION_MS,
+                "Topic " + topicName + " does not exist or does not have exactly "
+                        + partitions + " partitions or at least "
+                        + replicas + " per partition");
+        } catch (AssertionError e) {
+            throw new AssertionError(detailMessage, e);
+        }
+    }
+
+    protected Optional<Boolean> checkTopicSettings(String topicName, int replicas, int partitions) {
+        try {
+            Map<String, Optional<TopicDescription>> topics = connect.kafka().describeTopics(topicName);
+            TopicDescription topicDesc = topics.get(topicName).orElse(null);
+            boolean result = topicDesc != null
+                    && topicDesc.name().equals(topicName)
+                    && topicDesc.partitions().size() == partitions
+                    && topicDesc.partitions().stream().allMatch(p -> p.replicas().size() >= replicas);
+            return Optional.of(result);
+        } catch (Exception e) {
+            log.error("Failed to describe the topic: {}.", topicName, e);
+            return Optional.empty();
         }
     }
 
@@ -336,6 +351,61 @@ public class EmbeddedConnectClusterAssertions {
     }
 
     /**
+     * Assert that a connector is running, that it has a specific number of tasks out of that numFailedTasks are in the FAILED state.
+     *
+     * @param connectorName the connector name
+     * @param numTasks the number of tasks
+     * @param numFailedTasks the number of failed tasks
+     * @param detailMessage the assertion message
+     * @throws InterruptedException
+     */
+    public void assertConnectorIsRunningAndNumTasksHaveFailed(String connectorName, int numTasks, int numFailedTasks, String detailMessage)
+            throws InterruptedException {
+        try {
+            waitForCondition(
+                    () -> checkConnectorState(
+                            connectorName,
+                            AbstractStatus.State.RUNNING,
+                            numTasks,
+                            numFailedTasks,
+                            AbstractStatus.State.FAILED,
+                            (actual, expected) -> actual >= expected
+                    ).orElse(false),
+                    CONNECTOR_SETUP_DURATION_MS,
+                    "Either the connector is not running or not all the " + numTasks + " tasks have failed.");
+        } catch (AssertionError e) {
+            throw new AssertionError(detailMessage, e);
+        }
+    }
+
+    /**
+     * Assert that a connector is in FAILED state, that it has a specific number of tasks, and that all of
+     * its tasks are in the FAILED state.
+     *
+     * @param connectorName the connector name
+     * @param numTasks the number of tasks
+     * @param detailMessage the assertion message
+     * @throws InterruptedException
+     */
+    public void assertConnectorIsFailedAndTasksHaveFailed(String connectorName, int numTasks, String detailMessage)
+            throws InterruptedException {
+        try {
+            waitForCondition(
+                    () -> checkConnectorState(
+                            connectorName,
+                            AbstractStatus.State.FAILED,
+                            numTasks,
+                            AbstractStatus.State.FAILED,
+                            (actual, expected) -> actual >= expected
+                    ).orElse(false),
+                    CONNECTOR_SETUP_DURATION_MS,
+                    "Either the connector is running or not all the " + numTasks + " tasks have failed.");
+        } catch (AssertionError e) {
+            throw new AssertionError(detailMessage, e);
+        }
+    }
+
+    /**
      * Assert that a connector and its tasks are not running.
      *
      * @param connectorName the connector name
@@ -348,7 +418,7 @@ public class EmbeddedConnectClusterAssertions {
             waitForCondition(
                 () -> checkConnectorAndTasksAreStopped(connectorName),
                 CONNECTOR_SETUP_DURATION_MS,
-                "At least the connector or one of its tasks is still");
+                "At least the connector or one of its tasks is still running");
         } catch (AssertionError e) {
             throw new AssertionError(detailMessage, e);
         }
@@ -407,6 +477,36 @@ public class EmbeddedConnectClusterAssertions {
         }
     }
 
+    /**
+     * Check whether the given connector state matches the current state of the connector and
+     * whether it has at least the given number of tasks, with numTasksInTasksState matching the given
+     * task state.
+     * @param connectorName the connector
+     * @param connectorState
+     * @param numTasks the expected number of tasks
+     * @param tasksState
+     * @return true if the connector and tasks are in RUNNING state; false otherwise
+     */
+    protected Optional<Boolean> checkConnectorState(
+            String connectorName,
+            AbstractStatus.State connectorState,
+            int numTasks,
+            int numTasksInTasksState,
+            AbstractStatus.State tasksState,
+            BiFunction<Integer, Integer, Boolean> comp
+    ) {
+        try {
+            ConnectorStateInfo info = connect.connectorStatus(connectorName);
+            boolean result = info != null
+                    && comp.apply(info.tasks().size(), numTasks)
+                    && info.connector().state().equals(connectorState.toString())
+                    && info.tasks().stream().filter(s -> s.state().equals(tasksState.toString())).count() == numTasksInTasksState;
+            return Optional.of(result);
+        } catch (Exception e) {
+            log.error("Could not check connector state info.", e);
+            return Optional.empty();
+        }
+    }
     /**
      * Assert that a connector's set of active topics matches the given collection of topic names.
      *

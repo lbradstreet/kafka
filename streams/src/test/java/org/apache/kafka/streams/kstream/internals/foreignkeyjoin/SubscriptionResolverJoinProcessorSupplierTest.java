@@ -24,7 +24,6 @@ import org.apache.kafka.streams.kstream.ValueJoiner;
 import org.apache.kafka.streams.kstream.internals.KTableValueGetter;
 import org.apache.kafka.streams.kstream.internals.KTableValueGetterSupplier;
 import org.apache.kafka.streams.processor.MockProcessorContext;
-import org.apache.kafka.streams.processor.Processor;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.state.ValueAndTimestamp;
 import org.apache.kafka.streams.state.internals.Murmur3;
@@ -38,6 +37,7 @@ import static org.hamcrest.CoreMatchers.is;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.collection.IsEmptyCollection.empty;
 
+@SuppressWarnings("deprecation") // Old PAPI. Needs to be migrated.
 public class SubscriptionResolverJoinProcessorSupplierTest {
     private static final StringSerializer STRING_SERIALIZER = new StringSerializer();
     private static final ValueJoiner<String, String, String> JOINER =
@@ -57,9 +57,6 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
                 public ValueAndTimestamp<V> get(final K key) {
                     return ValueAndTimestamp.make(map.get(key), -1);
                 }
-
-                @Override
-                public void close() {}
             };
         }
 
@@ -86,7 +83,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
                 JOINER,
                 leftJoin
             );
-        final Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
+        final org.apache.kafka.streams.processor.Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
         final MockProcessorContext context = new MockProcessorContext();
         processor.init(context);
         context.setRecordMetadata("topic", 0, 0, new RecordHeaders(), 0);
@@ -111,7 +108,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
                 JOINER,
                 leftJoin
             );
-        final Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
+        final org.apache.kafka.streams.processor.Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
         final MockProcessorContext context = new MockProcessorContext();
         processor.init(context);
         context.setRecordMetadata("topic", 0, 0, new RecordHeaders(), 0);
@@ -136,7 +133,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
                 JOINER,
                 leftJoin
             );
-        final Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
+        final org.apache.kafka.streams.processor.Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
         final MockProcessorContext context = new MockProcessorContext();
         processor.init(context);
         context.setRecordMetadata("topic", 0, 0, new RecordHeaders(), 0);
@@ -162,7 +159,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
                 JOINER,
                 leftJoin
             );
-        final Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
+        final org.apache.kafka.streams.processor.Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
         final MockProcessorContext context = new MockProcessorContext();
         processor.init(context);
         context.setRecordMetadata("topic", 0, 0, new RecordHeaders(), 0);
@@ -188,7 +185,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
                 JOINER,
                 leftJoin
             );
-        final Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
+        final org.apache.kafka.streams.processor.Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
         final MockProcessorContext context = new MockProcessorContext();
         processor.init(context);
         context.setRecordMetadata("topic", 0, 0, new RecordHeaders(), 0);
@@ -214,7 +211,7 @@ public class SubscriptionResolverJoinProcessorSupplierTest {
                 JOINER,
                 leftJoin
             );
-        final Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
+        final org.apache.kafka.streams.processor.Processor<String, SubscriptionResponseWrapper<String>> processor = processorSupplier.get();
         final MockProcessorContext context = new MockProcessorContext();
         processor.init(context);
         context.setRecordMetadata("topic", 0, 0, new RecordHeaders(), 0);

@@ -20,6 +20,7 @@ import org.apache.kafka.common.Cluster;
 import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.InvalidMetadataException;
 import org.apache.kafka.common.errors.InvalidTopicException;
 import org.apache.kafka.common.errors.TopicAuthorizationException;
@@ -41,7 +42,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
-import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 import static org.apache.kafka.common.record.RecordBatch.NO_PARTITION_LEADER_EPOCH;
@@ -156,43 +156,41 @@ public class Metadata implements Closeable {
     }
 
     /**
-     * Request an update for the partition metadata iff the given leader epoch is newer than the last seen leader epoch
+     * Request an update for the partition metadata iff we have seen a newer leader epoch. This is called by the client
+     * any time it handles a response from the broker that includes leader epoch, except for UpdateMetadata which
+     * follows a different code path ({@link #update}).
+     *
+     * @param topicPartition
+     * @param leaderEpoch
+     * @return true if we updated the last seen epoch, false otherwise
      */
     public synchronized boolean updateLastSeenEpochIfNewer(TopicPartition topicPartition, int leaderEpoch) {
         Objects.requireNonNull(topicPartition, "TopicPartition cannot be null");
         if (leaderEpoch < 0)
             throw new IllegalArgumentException("Invalid leader epoch " + leaderEpoch + " (must be non-negative)");
 
-        boolean updated = updateLastSeenEpoch(topicPartition, leaderEpoch, oldEpoch -> leaderEpoch > oldEpoch);
+        Integer oldEpoch = lastSeenLeaderEpochs.get(topicPartition);
+        log.trace("Determining if we should replace existing epoch {} with new epoch {} for partition {}", oldEpoch, leaderEpoch, topicPartition);
+
+        final boolean updated;
+        if (oldEpoch == null) {
+            log.debug("Not replacing null epoch with new epoch {} for partition {}", leaderEpoch, topicPartition);
+            updated = false;
+        } else if (leaderEpoch > oldEpoch) {
+            log.debug("Updating last seen epoch from {} to {} for partition {}", oldEpoch, leaderEpoch, topicPartition);
+            lastSeenLeaderEpochs.put(topicPartition, leaderEpoch);
+            updated = true;
+        } else {
+            log.debug("Not replacing existing epoch {} with new epoch {} for partition {}", oldEpoch, leaderEpoch, topicPartition);
+            updated = false;
+        }
+
         this.needFullUpdate = this.needFullUpdate || updated;
         return updated;
     }
 
     public Optional<Integer> lastSeenLeaderEpoch(TopicPartition topicPartition) {
         return Optional.ofNullable(lastSeenLeaderEpochs.get(topicPartition));
-    }
-
-    /**
-     * Conditionally update the leader epoch for a partition
-     *
-     * @param topicPartition       topic+partition to update the epoch for
-     * @param epoch                the new epoch
-     * @param epochTest            a predicate to determine if the old epoch should be replaced
-     * @return true if the epoch was updated, false otherwise
-     */
-    private synchronized boolean updateLastSeenEpoch(TopicPartition topicPartition,
-                                                     int epoch,
-                                                     Predicate<Integer> epochTest) {
-        Integer oldEpoch = lastSeenLeaderEpochs.get(topicPartition);
-        log.trace("Determining if we should replace existing epoch {} with new epoch {}", oldEpoch, epoch);
-        if (oldEpoch == null || epochTest.test(oldEpoch)) {
-            log.debug("Updating last seen epoch from {} to {} for partition {}", oldEpoch, epoch, topicPartition);
-            lastSeenLeaderEpochs.put(topicPartition, epoch);
-            return true;
-        } else {
-            log.debug("Not replacing existing epoch {} with new epoch {} for partition {}", oldEpoch, epoch, topicPartition);
-            return false;
-        }
     }
 
     /**
@@ -219,6 +217,14 @@ public class Metadata implements Closeable {
         }
     }
 
+    public synchronized Map<String, Uuid> topicIds() {
+        return cache.topicIds();
+    }
+
+    public synchronized Map<Uuid, String> topicNames() {
+        return cache.topicNames();
+    }
+
     public synchronized LeaderAndEpoch currentLeader(TopicPartition topicPartition) {
         Optional<MetadataResponse.PartitionMetadata> maybeMetadata = partitionMetadataIfCurrent(topicPartition);
         if (!maybeMetadata.isPresent())
@@ -237,7 +243,9 @@ public class Metadata implements Closeable {
     }
 
     /**
-     * Update metadata assuming the current request version. This is mainly for convenience in testing.
+     * Update metadata assuming the current request version.
+     *
+     * For testing only.
      */
     public synchronized void updateWithCurrentRequestVersion(MetadataResponse response, boolean isPartialUpdate, long nowMs) {
         this.update(this.requestVersion, response, isPartialUpdate, nowMs);
@@ -317,8 +325,11 @@ public class Metadata implements Closeable {
         Set<String> invalidTopics = new HashSet<>();
 
         List<MetadataResponse.PartitionMetadata> partitions = new ArrayList<>();
+        Map<String, Uuid> topicIds = new HashMap<>();
         for (MetadataResponse.TopicMetadata metadata : metadataResponse.topicMetadata()) {
             topics.add(metadata.topic());
+            if (!metadata.topicId().equals(Uuid.ZERO_UUID))
+                topicIds.put(metadata.topic(), metadata.topicId());
 
             if (!retainTopic(metadata.topic(), metadata.isInternal(), nowMs))
                 continue;
@@ -355,11 +366,11 @@ public class Metadata implements Closeable {
         Map<Integer, Node> nodes = metadataResponse.brokersById();
         if (isPartialUpdate)
             return this.cache.mergeWith(metadataResponse.clusterId(), nodes, partitions,
-                unauthorizedTopics, invalidTopics, internalTopics, metadataResponse.controller(),
+                unauthorizedTopics, invalidTopics, internalTopics, metadataResponse.controller(), topicIds,
                 (topic, isInternal) -> !topics.contains(topic) && retainTopic(topic, isInternal, nowMs));
         else
             return new MetadataCache(metadataResponse.clusterId(), nodes, partitions,
-                unauthorizedTopics, invalidTopics, internalTopics, metadataResponse.controller());
+                unauthorizedTopics, invalidTopics, internalTopics, metadataResponse.controller(), topicIds);
     }
 
     /**
@@ -373,10 +384,14 @@ public class Metadata implements Closeable {
         if (hasReliableLeaderEpoch && partitionMetadata.leaderEpoch.isPresent()) {
             int newEpoch = partitionMetadata.leaderEpoch.get();
             // If the received leader epoch is at least the same as the previous one, update the metadata
-            if (updateLastSeenEpoch(tp, newEpoch, oldEpoch -> newEpoch >= oldEpoch)) {
+            Integer currentEpoch = lastSeenLeaderEpochs.get(tp);
+            if (currentEpoch == null || newEpoch >= currentEpoch) {
+                log.debug("Updating last seen epoch for partition {} from {} to epoch {} from new metadata", tp, currentEpoch, newEpoch);
+                lastSeenLeaderEpochs.put(tp, newEpoch);
                 return Optional.of(partitionMetadata);
             } else {
                 // Otherwise ignore the new metadata and use the previously cached info
+                log.debug("Got metadata for an older epoch {} (current is {}) for partition {}, not updating", newEpoch, currentEpoch, tp);
                 return cache.partitionMetadata(tp);
             }
         } else {
@@ -400,7 +415,7 @@ public class Metadata implements Closeable {
      * the producer to abort waiting for metadata if there were fatal exceptions (e.g. authentication failures)
      * in the last metadata update.
      */
-    public synchronized void maybeThrowFatalException() {
+    protected synchronized void maybeThrowFatalException() {
         KafkaException metadataException = this.fatalException;
         if (metadataException != null) {
             fatalException = null;

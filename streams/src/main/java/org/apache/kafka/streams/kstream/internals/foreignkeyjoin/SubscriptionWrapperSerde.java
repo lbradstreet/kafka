@@ -21,36 +21,26 @@ import org.apache.kafka.common.serialization.Deserializer;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.streams.kstream.internals.WrappingNullableDeserializer;
+import org.apache.kafka.streams.kstream.internals.WrappingNullableSerde;
 import org.apache.kafka.streams.kstream.internals.WrappingNullableSerializer;
+import org.apache.kafka.streams.processor.internals.SerdeGetter;
 
 import java.nio.ByteBuffer;
-import java.util.Objects;
 import java.util.function.Supplier;
 
-public class SubscriptionWrapperSerde<K> implements Serde<SubscriptionWrapper<K>> {
-    private final SubscriptionWrapperSerializer<K> serializer;
-    private final SubscriptionWrapperDeserializer<K> deserializer;
-
+public class SubscriptionWrapperSerde<K> extends WrappingNullableSerde<SubscriptionWrapper<K>, K, Void> {
     public SubscriptionWrapperSerde(final Supplier<String> primaryKeySerializationPseudoTopicSupplier,
                                     final Serde<K> primaryKeySerde) {
-        serializer = new SubscriptionWrapperSerializer<>(primaryKeySerializationPseudoTopicSupplier,
-                                                         primaryKeySerde == null ? null : primaryKeySerde.serializer());
-        deserializer = new SubscriptionWrapperDeserializer<>(primaryKeySerializationPseudoTopicSupplier,
-                                                             primaryKeySerde == null ? null : primaryKeySerde.deserializer());
-    }
-
-    @Override
-    public Serializer<SubscriptionWrapper<K>> serializer() {
-        return serializer;
-    }
-
-    @Override
-    public Deserializer<SubscriptionWrapper<K>> deserializer() {
-        return deserializer;
+        super(
+            new SubscriptionWrapperSerializer<>(primaryKeySerializationPseudoTopicSupplier,
+                                                primaryKeySerde == null ? null : primaryKeySerde.serializer()),
+            new SubscriptionWrapperDeserializer<>(primaryKeySerializationPseudoTopicSupplier,
+                                                  primaryKeySerde == null ? null : primaryKeySerde.deserializer())
+        );
     }
 
     private static class SubscriptionWrapperSerializer<K>
-        implements Serializer<SubscriptionWrapper<K>>, WrappingNullableSerializer<SubscriptionWrapper<K>, K> {
+        implements Serializer<SubscriptionWrapper<K>>, WrappingNullableSerializer<SubscriptionWrapper<K>, K, Void> {
 
         private final Supplier<String> primaryKeySerializationPseudoTopicSupplier;
         private String primaryKeySerializationPseudoTopic = null;
@@ -62,10 +52,11 @@ public class SubscriptionWrapperSerde<K> implements Serde<SubscriptionWrapper<K>
             this.primaryKeySerializer = primaryKeySerializer;
         }
 
+        @SuppressWarnings("unchecked")
         @Override
-        public void setIfUnset(final Serializer<K> defaultSerializer) {
+        public void setIfUnset(final SerdeGetter getter) {
             if (primaryKeySerializer == null) {
-                primaryKeySerializer = Objects.requireNonNull(defaultSerializer, "defaultSerializer cannot be null");
+                primaryKeySerializer = (Serializer<K>) getter.keySerde().serializer();
             }
         }
 
@@ -110,7 +101,7 @@ public class SubscriptionWrapperSerde<K> implements Serde<SubscriptionWrapper<K>
     }
 
     private static class SubscriptionWrapperDeserializer<K>
-        implements Deserializer<SubscriptionWrapper<K>>, WrappingNullableDeserializer<SubscriptionWrapper<K>, K> {
+        implements Deserializer<SubscriptionWrapper<K>>, WrappingNullableDeserializer<SubscriptionWrapper<K>, K, Void> {
 
         private final Supplier<String> primaryKeySerializationPseudoTopicSupplier;
         private String primaryKeySerializationPseudoTopic = null;
@@ -122,10 +113,11 @@ public class SubscriptionWrapperSerde<K> implements Serde<SubscriptionWrapper<K>
             this.primaryKeyDeserializer = primaryKeyDeserializer;
         }
 
+        @SuppressWarnings("unchecked")
         @Override
-        public void setIfUnset(final Deserializer<K> defaultDeserializer) {
+        public void setIfUnset(final SerdeGetter getter) {
             if (primaryKeyDeserializer == null) {
-                primaryKeyDeserializer = Objects.requireNonNull(defaultDeserializer, "defaultDeserializer cannot be null");
+                primaryKeyDeserializer = (Deserializer<K>) getter.keySerde().deserializer();
             }
         }
 

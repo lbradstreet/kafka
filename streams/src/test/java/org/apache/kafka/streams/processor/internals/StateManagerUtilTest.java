@@ -16,11 +16,12 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
+import java.util.List;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.errors.LockException;
 import org.apache.kafka.streams.errors.ProcessorStateException;
-import org.apache.kafka.streams.errors.StreamsException;
+import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.internals.Task.TaskType;
 import org.apache.kafka.test.MockKeyValueStore;
@@ -95,7 +96,7 @@ public class StateManagerUtilTest {
     }
 
     @Test
-    public void testRegisterStateStoreFailToLockStateDirectory() throws IOException {
+    public void testRegisterStateStoreFailToLockStateDirectory() {
         expect(topology.stateStores()).andReturn(singletonList(new MockKeyValueStore("store", false)));
 
         expect(stateManager.taskId()).andReturn(taskId);
@@ -115,54 +116,21 @@ public class StateManagerUtilTest {
     }
 
     @Test
-    public void testRegisterStateStoreLockThrowIOExceptionWrappedAsStreamException() throws IOException {
-        expect(topology.stateStores()).andReturn(singletonList(new MockKeyValueStore("store", false)));
+    public void testRegisterStateStores() {
+        final MockKeyValueStore store1 = new MockKeyValueStore("store1", false);
+        final MockKeyValueStore store2 = new MockKeyValueStore("store2", false);
+        final List<StateStore> stateStores = Arrays.asList(store1, store2);
 
-        expect(stateManager.taskId()).andReturn(taskId);
-
-        expect(stateDirectory.lock(taskId)).andThrow(new IOException("Fail to lock state dir"));
-
-        ctrl.checkOrder(true);
-        ctrl.replay();
-
-        final StreamsException thrown = assertThrows(StreamsException.class,
-            () -> StateManagerUtil.registerStateStores(logger, "logPrefix:",
-                topology, stateManager, stateDirectory, processorContext));
-
-        assertEquals("logPrefix:Fatal error while trying to " +
-            "lock the state directory for task 0_0", thrown.getMessage());
-        assertEquals(IOException.class, thrown.getCause().getClass());
-        assertEquals("Fail to lock state dir", thrown.getCause().getMessage());
-
-        ctrl.verify();
-    }
-
-    @Test
-    public void testRegisterStateStores() throws IOException {
-        expect(topology.stateStores())
-            .andReturn(Arrays.asList(new MockKeyValueStore("store1", false),
-                new MockKeyValueStore("store2", false)));
+        expect(topology.stateStores()).andReturn(stateStores);
 
         expect(stateManager.taskId()).andReturn(taskId);
 
         expect(stateDirectory.lock(taskId)).andReturn(true);
         expect(stateDirectory.directoryForTaskIsEmpty(taskId)).andReturn(true);
 
-        final MockKeyValueStore store1 = new MockKeyValueStore("store1", false);
-        final MockKeyValueStore store2 = new MockKeyValueStore("store2", false);
+        expect(topology.stateStores()).andReturn(stateStores);
 
-        expect(topology.stateStores()).andReturn(Arrays.asList(store1, store2));
-
-        // Store1 will be registered as it hasn't been registered before.
-        expect(stateManager.getStore(store1.name())).andReturn(null);
-
-        processorContext.uninitialize();
-        expectLastCall();
-        processorContext.register(store1, store1.stateRestoreCallback);
-        expectLastCall();
-
-        // Store2 is already registered, so no more registration will happen.
-        expect(stateManager.getStore(store2.name())).andReturn(store2);
+        stateManager.registerStateStores(stateStores, processorContext);
 
         stateManager.initializeStoreOffsetsFromCheckpoint(true);
         expectLastCall();
@@ -177,7 +145,7 @@ public class StateManagerUtilTest {
     }
 
     @Test
-    public void testCloseStateManagerClean() throws IOException {
+    public void testCloseStateManagerClean() {
         expect(stateManager.taskId()).andReturn(taskId);
 
         expect(stateDirectory.lock(taskId)).andReturn(true);
@@ -198,31 +166,7 @@ public class StateManagerUtilTest {
     }
 
     @Test
-    public void testCloseStateManagerThrowsExceptionWhenClean() throws IOException {
-        expect(stateManager.taskId()).andReturn(taskId);
-
-        expect(stateDirectory.lock(taskId)).andReturn(true);
-
-        stateManager.close();
-        expectLastCall();
-
-        stateDirectory.unlock(taskId);
-        expectLastCall().andThrow(new IOException("Timeout"));
-
-        ctrl.checkOrder(true);
-        ctrl.replay();
-
-        final ProcessorStateException thrown = assertThrows(
-            ProcessorStateException.class, () -> StateManagerUtil.closeStateManager(logger,
-            "logPrefix:", true, false, stateManager, stateDirectory, TaskType.ACTIVE));
-
-        assertEquals(IOException.class, thrown.getCause().getClass());
-
-        ctrl.verify();
-    }
-
-    @Test
-    public void testCloseStateManagerOnlyThrowsFirstExceptionWhenClean() throws IOException {
+    public void testCloseStateManagerThrowsExceptionWhenClean() {
         expect(stateManager.taskId()).andReturn(taskId);
 
         expect(stateDirectory.lock(taskId)).andReturn(true);
@@ -232,7 +176,6 @@ public class StateManagerUtilTest {
 
         // The unlock logic should still be executed.
         stateDirectory.unlock(taskId);
-        expectLastCall().andThrow(new IOException("Timeout"));
 
         ctrl.checkOrder(true);
         ctrl.replay();
@@ -248,32 +191,29 @@ public class StateManagerUtilTest {
     }
 
     @Test
-    public void testCloseStateManagerThrowsExceptionWhenDirty() throws IOException {
+    public void testCloseStateManagerThrowsExceptionWhenDirty() {
         expect(stateManager.taskId()).andReturn(taskId);
 
         expect(stateDirectory.lock(taskId)).andReturn(true);
 
         stateManager.close();
-        expectLastCall();
+        expectLastCall().andThrow(new ProcessorStateException("state manager failed to close"));
 
         stateDirectory.unlock(taskId);
-        expectLastCall().andThrow(new IOException("Timeout"));
 
         ctrl.checkOrder(true);
         ctrl.replay();
 
-        final ProcessorStateException thrown = assertThrows(
+        assertThrows(
             ProcessorStateException.class,
             () -> StateManagerUtil.closeStateManager(
                 logger, "logPrefix:", false, false, stateManager, stateDirectory, TaskType.ACTIVE));
-
-        assertEquals(IOException.class, thrown.getCause().getClass());
 
         ctrl.verify();
     }
 
     @Test
-    public void testCloseStateManagerWithStateStoreWipeOut() throws IOException {
+    public void testCloseStateManagerWithStateStoreWipeOut() {
         expect(stateManager.taskId()).andReturn(taskId);
         expect(stateDirectory.lock(taskId)).andReturn(true);
 
@@ -291,6 +231,35 @@ public class StateManagerUtilTest {
 
         StateManagerUtil.closeStateManager(logger,
             "logPrefix:", false, true, stateManager, stateDirectory, TaskType.ACTIVE);
+
+        ctrl.verify();
+    }
+
+    @Test
+    public void  shouldStillWipeStateStoresIfCloseThrowsException() throws IOException {
+        final File randomFile = new File("/random/path");
+        mockStatic(Utils.class);
+
+        expect(stateManager.taskId()).andReturn(taskId);
+        expect(stateDirectory.lock(taskId)).andReturn(true);
+
+        stateManager.close();
+        expectLastCall().andThrow(new ProcessorStateException("Close failed"));
+
+        expect(stateManager.baseDir()).andReturn(randomFile);
+
+        Utils.delete(randomFile);
+
+        stateDirectory.unlock(taskId);
+        expectLastCall();
+
+        ctrl.checkOrder(true);
+        ctrl.replay();
+
+        replayAll();
+
+        assertThrows(ProcessorStateException.class, () ->
+            StateManagerUtil.closeStateManager(logger, "logPrefix:", false, true, stateManager, stateDirectory, TaskType.ACTIVE));
 
         ctrl.verify();
     }
@@ -329,7 +298,7 @@ public class StateManagerUtilTest {
     }
 
     @Test
-    public void shouldNotCloseStateManagerIfUnableToLockTaskDirectory() throws IOException {
+    public void shouldNotCloseStateManagerIfUnableToLockTaskDirectory() {
         expect(stateManager.taskId()).andReturn(taskId);
 
         expect(stateDirectory.lock(taskId)).andReturn(false);
@@ -350,7 +319,6 @@ public class StateManagerUtilTest {
     public void shouldNotWipeStateStoresIfUnableToLockTaskDirectory() throws IOException {
         final File unknownFile = new File("/unknown/path");
         expect(stateManager.taskId()).andReturn(taskId);
-
         expect(stateDirectory.lock(taskId)).andReturn(false);
 
         expect(stateManager.baseDir()).andReturn(unknownFile);

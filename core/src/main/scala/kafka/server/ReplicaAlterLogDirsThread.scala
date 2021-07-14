@@ -17,25 +17,24 @@
 
 package kafka.server
 
-import java.util
-import java.util.Optional
-
 import kafka.api.Request
 import kafka.cluster.BrokerEndPoint
-import kafka.log.LogAppendInfo
-import kafka.server.AbstractFetcherThread.ReplicaFetch
-import kafka.server.AbstractFetcherThread.ResultWithPartitions
+import kafka.log.{LeaderOffsetIncremented, LogAppendInfo}
+import kafka.server.AbstractFetcherThread.{ReplicaFetch, ResultWithPartitions}
 import kafka.server.QuotaFactory.UnboundedQuota
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.errors.KafkaStorageException
+import org.apache.kafka.common.message.FetchResponseData
+import org.apache.kafka.common.message.OffsetForLeaderEpochResponseData.EpochEndOffset
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
-import org.apache.kafka.common.record.Records
-import org.apache.kafka.common.requests.EpochEndOffset._
-import org.apache.kafka.common.requests.FetchResponse.PartitionData
-import org.apache.kafka.common.requests.{EpochEndOffset, FetchRequest, FetchResponse}
+import org.apache.kafka.common.requests.OffsetsForLeaderEpochResponse.UNDEFINED_EPOCH
+import org.apache.kafka.common.requests.{FetchRequest, FetchResponse, RequestUtils}
 
+import java.util
+import java.util.Optional
+import scala.collection.{Map, Seq, Set, mutable}
+import scala.compat.java8.OptionConverters._
 import scala.jdk.CollectionConverters._
-import scala.collection.{mutable, Map, Seq, Set}
 
 class ReplicaAlterLogDirsThread(name: String,
                                 sourceBroker: BrokerEndPoint,
@@ -74,17 +73,28 @@ class ReplicaAlterLogDirsThread(name: String,
   }
 
   def fetchFromLeader(fetchRequest: FetchRequest.Builder): Map[TopicPartition, FetchData] = {
-    var partitionData: Seq[(TopicPartition, FetchResponse.PartitionData[Records])] = null
+    var partitionData: Seq[(TopicPartition, FetchData)] = null
     val request = fetchRequest.build()
+
+    val (topicIds, topicNames) = replicaMgr.metadataCache.topicIdInfo()
 
     def processResponseCallback(responsePartitionData: Seq[(TopicPartition, FetchPartitionData)]): Unit = {
       partitionData = responsePartitionData.map { case (tp, data) =>
         val abortedTransactions = data.abortedTransactions.map(_.asJava).orNull
         val lastStableOffset = data.lastStableOffset.getOrElse(FetchResponse.INVALID_LAST_STABLE_OFFSET)
-        tp -> new FetchResponse.PartitionData(data.error, data.highWatermark, lastStableOffset,
-          data.logStartOffset, abortedTransactions, data.records)
+        tp -> new FetchResponseData.PartitionData()
+          .setPartitionIndex(tp.partition)
+          .setErrorCode(data.error.code)
+          .setHighWatermark(data.highWatermark)
+          .setLastStableOffset(lastStableOffset)
+          .setLogStartOffset(data.logStartOffset)
+          .setAbortedTransactions(abortedTransactions)
+          .setRecords(data.records)
       }
     }
+
+    // Will throw UnknownTopicIdException if a topic ID is unknown.
+    val fetchData = request.fetchData(topicNames)
 
     replicaMgr.fetchMessages(
       0L, // timeout is 0 so that the callback will be executed immediately
@@ -92,14 +102,15 @@ class ReplicaAlterLogDirsThread(name: String,
       request.minBytes,
       request.maxBytes,
       false,
-      request.fetchData.asScala.toSeq,
+      fetchData.asScala.toSeq,
+      topicIds,
       UnboundedQuota,
       processResponseCallback,
       request.isolationLevel,
       None)
 
     if (partitionData == null)
-      throw new IllegalStateException(s"Failed to fetch data for partitions ${request.fetchData.keySet().toArray.mkString(",")}")
+      throw new IllegalStateException(s"Failed to fetch data for partitions ${fetchData.keySet().toArray.mkString(",")}")
 
     partitionData.toMap
   }
@@ -107,10 +118,10 @@ class ReplicaAlterLogDirsThread(name: String,
   // process fetched data
   override def processPartitionData(topicPartition: TopicPartition,
                                     fetchOffset: Long,
-                                    partitionData: PartitionData[Records]): Option[LogAppendInfo] = {
-    val partition = replicaMgr.nonOfflinePartition(topicPartition).get
+                                    partitionData: FetchData): Option[LogAppendInfo] = {
+    val partition = replicaMgr.getPartitionOrException(topicPartition)
     val futureLog = partition.futureLocalLogOrException
-    val records = toMemoryRecords(partitionData.records)
+    val records = toMemoryRecords(FetchResponse.recordsOrFail(partitionData))
 
     if (fetchOffset != futureLog.logEndOffset)
       throw new IllegalStateException("Offset mismatch for the future replica %s: fetched offset = %d, log end offset = %d.".format(
@@ -122,7 +133,7 @@ class ReplicaAlterLogDirsThread(name: String,
       None
 
     futureLog.updateHighWatermark(partitionData.highWatermark)
-    futureLog.maybeIncrementLogStartOffset(partitionData.logStartOffset)
+    futureLog.maybeIncrementLogStartOffset(partitionData.logStartOffset, LeaderOffsetIncremented)
 
     if (partition.maybeReplaceCurrentWithFutureReplica())
       removePartitions(Set(topicPartition))
@@ -131,7 +142,7 @@ class ReplicaAlterLogDirsThread(name: String,
     logAppendInfo
   }
 
-  override def addPartitions(initialFetchStates: Map[TopicPartition, OffsetAndEpoch]): Set[TopicPartition] = {
+  override def addPartitions(initialFetchStates: Map[TopicPartition, InitialFetchState]): Set[TopicPartition] = {
     partitionMapLock.lockInterruptibly()
     try {
       // It is possible that the log dir fetcher completed just before this call, so we
@@ -146,12 +157,12 @@ class ReplicaAlterLogDirsThread(name: String,
   }
 
   override protected def fetchEarliestOffsetFromLeader(topicPartition: TopicPartition, leaderEpoch: Int): Long = {
-    val partition = replicaMgr.getPartitionOrException(topicPartition, expectLeader = false)
+    val partition = replicaMgr.getPartitionOrException(topicPartition)
     partition.localLogOrException.logStartOffset
   }
 
   override protected def fetchLatestOffsetFromLeader(topicPartition: TopicPartition, leaderEpoch: Int): Long = {
-    val partition = replicaMgr.getPartitionOrException(topicPartition, expectLeader = false)
+    val partition = replicaMgr.getPartitionOrException(topicPartition)
     partition.localLogOrException.logEndOffset
   }
 
@@ -164,11 +175,13 @@ class ReplicaAlterLogDirsThread(name: String,
     partitions.map { case (tp, epochData) =>
       try {
         val endOffset = if (epochData.leaderEpoch == UNDEFINED_EPOCH) {
-          new EpochEndOffset(UNDEFINED_EPOCH, UNDEFINED_EPOCH_OFFSET)
+          new EpochEndOffset()
+            .setPartition(tp.partition)
+            .setErrorCode(Errors.NONE.code)
         } else {
-          val partition = replicaMgr.getPartitionOrException(tp, expectLeader = false)
+          val partition = replicaMgr.getPartitionOrException(tp)
           partition.lastOffsetForLeaderEpoch(
-            currentLeaderEpoch = epochData.currentLeaderEpoch,
+            currentLeaderEpoch = RequestUtils.getLeaderEpoch(epochData.currentLeaderEpoch),
             leaderEpoch = epochData.leaderEpoch,
             fetchOnlyFromLeader = false)
         }
@@ -176,12 +189,16 @@ class ReplicaAlterLogDirsThread(name: String,
       } catch {
         case t: Throwable =>
           warn(s"Error when getting EpochEndOffset for $tp", t)
-          tp -> new EpochEndOffset(Errors.forException(t), UNDEFINED_EPOCH, UNDEFINED_EPOCH_OFFSET)
+          tp -> new EpochEndOffset()
+            .setPartition(tp.partition)
+            .setErrorCode(Errors.forException(t).code)
       }
     }
   }
 
-  override protected def isOffsetForLeaderEpochSupported: Boolean = true
+  override protected val isOffsetForLeaderEpochSupported: Boolean = true
+
+  override protected val isTruncationOnFetchSupported: Boolean = false
 
   /**
    * Truncate the log for each partition based on current replica's returned epoch and offset.
@@ -198,12 +215,12 @@ class ReplicaAlterLogDirsThread(name: String,
    * exchange with the current replica to truncate to the largest common log prefix for the topic partition
    */
   override def truncate(topicPartition: TopicPartition, truncationState: OffsetTruncationState): Unit = {
-    val partition = replicaMgr.getPartitionOrException(topicPartition, expectLeader = false)
+    val partition = replicaMgr.getPartitionOrException(topicPartition)
     partition.truncateTo(truncationState.offset, isFuture = true)
   }
 
   override protected def truncateFullyAndStartAt(topicPartition: TopicPartition, offset: Long): Unit = {
-    val partition = replicaMgr.getPartitionOrException(topicPartition, expectLeader = false)
+    val partition = replicaMgr.getPartitionOrException(topicPartition)
     partition.truncateFullyAndStartAt(offset, isFuture = true)
   }
 
@@ -245,11 +262,16 @@ class ReplicaAlterLogDirsThread(name: String,
   private def buildFetchForPartition(tp: TopicPartition, fetchState: PartitionFetchState): ResultWithPartitions[Option[ReplicaFetch]] = {
     val requestMap = new util.LinkedHashMap[TopicPartition, FetchRequest.PartitionData]
     val partitionsWithError = mutable.Set[TopicPartition]()
+    val topicIds = replicaMgr.metadataCache.topicNamesToIds()
 
     try {
       val logStartOffset = replicaMgr.futureLocalLogOrException(tp).logStartOffset
+      val lastFetchedEpoch = if (isTruncationOnFetchSupported)
+        fetchState.lastFetchedEpoch.map(_.asInstanceOf[Integer]).asJava
+      else
+        Optional.empty[Integer]
       requestMap.put(tp, new FetchRequest.PartitionData(fetchState.fetchOffset, logStartOffset,
-        fetchSize, Optional.of(fetchState.currentLeaderEpoch)))
+        fetchSize, Optional.of(fetchState.currentLeaderEpoch), lastFetchedEpoch))
     } catch {
       case e: KafkaStorageException =>
         debug(s"Failed to build fetch for $tp", e)
@@ -259,9 +281,14 @@ class ReplicaAlterLogDirsThread(name: String,
     val fetchRequestOpt = if (requestMap.isEmpty) {
       None
     } else {
+      val version: Short = if (topicIds.containsKey(tp.topic()))
+        12
+      else
+        ApiKeys.FETCH.latestVersion
       // Set maxWait and minBytes to 0 because the response should return immediately if
       // the future log has caught up with the current log of the partition
-      val requestBuilder = FetchRequest.Builder.forReplica(ApiKeys.FETCH.latestVersion, replicaId, 0, 0, requestMap).setMaxBytes(maxBytes)
+      val requestBuilder = FetchRequest.Builder.forReplica(version, replicaId, 0, 0, requestMap,
+        topicIds).setMaxBytes(maxBytes)
       Some(ReplicaFetch(requestMap, requestBuilder))
     }
 

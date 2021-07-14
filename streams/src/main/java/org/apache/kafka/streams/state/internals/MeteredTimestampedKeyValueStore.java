@@ -16,18 +16,16 @@
  */
 package org.apache.kafka.streams.state.internals;
 
-import static org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency;
-
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.streams.errors.ProcessorStateException;
-import org.apache.kafka.streams.processor.ProcessorContext;
-import org.apache.kafka.streams.processor.internals.ProcessorStateManager;
+import org.apache.kafka.streams.processor.internals.SerdeGetter;
 import org.apache.kafka.streams.state.KeyValueStore;
-import org.apache.kafka.streams.state.StateSerdes;
 import org.apache.kafka.streams.state.TimestampedKeyValueStore;
 import org.apache.kafka.streams.state.ValueAndTimestamp;
+
+import static org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl.maybeMeasureLatency;
 
 /**
  * A Metered {@link TimestampedKeyValueStore} wrapper that is used for recording operation metrics, and hence its
@@ -49,19 +47,23 @@ public class MeteredTimestampedKeyValueStore<K, V>
         super(inner, metricScope, time, keySerde, valueSerde);
     }
 
+
     @SuppressWarnings("unchecked")
-    void initStoreSerde(final ProcessorContext context) {
-        serdes = new StateSerdes<>(
-            ProcessorStateManager.storeChangelogTopic(context.applicationId(), name()),
-            keySerde == null ? (Serde<K>) context.keySerde() : keySerde,
-            valueSerde == null ? new ValueAndTimestampSerde<>((Serde<V>) context.valueSerde()) : valueSerde);
+    @Override
+    protected Serde<ValueAndTimestamp<V>> prepareValueSerdeForStore(final Serde<ValueAndTimestamp<V>> valueSerde, final SerdeGetter getter) {
+        if (valueSerde == null) {
+            return new ValueAndTimestampSerde<>((Serde<V>) getter.valueSerde());
+        } else {
+            return super.prepareValueSerdeForStore(valueSerde, getter);
+        }
     }
+
 
     public RawAndDeserializedValue<V> getWithBinary(final K key) {
         try {
             return maybeMeasureLatency(() -> { 
                 final byte[] serializedValue = wrapped().get(keyBytes(key));
-                return new RawAndDeserializedValue<V>(serializedValue, outerValue(serializedValue));
+                return new RawAndDeserializedValue<>(serializedValue, outerValue(serializedValue));
             }, time, getSensor);
         } catch (final ProcessorStateException e) {
             final String message = String.format(e.getMessage(), key);
@@ -76,7 +78,7 @@ public class MeteredTimestampedKeyValueStore<K, V>
             return maybeMeasureLatency(
                 () -> {
                     final byte[] newSerializedValue = serdes.rawValue(newValue);
-                    if (ValueAndTimestampSerializer.compareValuesAndCheckForIncreasingTimestamp(oldSerializedValue, newSerializedValue)) {
+                    if (ValueAndTimestampSerializer.valuesAreSameAndTimeIsIncreasing(oldSerializedValue, newSerializedValue)) {
                         return false;
                     } else {
                         wrapped().put(keyBytes(key), newSerializedValue);
@@ -92,10 +94,10 @@ public class MeteredTimestampedKeyValueStore<K, V>
         }
     }
 
-    public static class RawAndDeserializedValue<ValueType> {
-        public final byte[] serializedValue;
-        public final ValueAndTimestamp<ValueType> value;
-        public RawAndDeserializedValue(final byte[] serializedValue, final ValueAndTimestamp<ValueType> value) {
+    static class RawAndDeserializedValue<ValueType> {
+        final byte[] serializedValue;
+        final ValueAndTimestamp<ValueType> value;
+        RawAndDeserializedValue(final byte[] serializedValue, final ValueAndTimestamp<ValueType> value) {
             this.serializedValue = serializedValue;
             this.value = value;
         }

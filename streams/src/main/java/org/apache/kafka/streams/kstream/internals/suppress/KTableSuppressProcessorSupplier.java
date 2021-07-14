@@ -18,7 +18,6 @@ package org.apache.kafka.streams.kstream.internals.suppress;
 
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.metrics.Sensor;
-import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.streams.errors.StreamsException;
 import org.apache.kafka.streams.kstream.internals.Change;
 import org.apache.kafka.streams.kstream.internals.KTableImpl;
@@ -26,10 +25,9 @@ import org.apache.kafka.streams.kstream.internals.KTableProcessorSupplier;
 import org.apache.kafka.streams.kstream.internals.KTableValueGetter;
 import org.apache.kafka.streams.kstream.internals.KTableValueGetterSupplier;
 import org.apache.kafka.streams.kstream.internals.suppress.TimeDefinitions.TimeDefinition;
-import org.apache.kafka.streams.processor.Processor;
-import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
 import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
+import org.apache.kafka.streams.processor.internals.SerdeGetter;
 import org.apache.kafka.streams.processor.internals.metrics.ProcessorNodeMetrics;
 import org.apache.kafka.streams.state.ValueAndTimestamp;
 import org.apache.kafka.streams.state.internals.Maybe;
@@ -37,6 +35,7 @@ import org.apache.kafka.streams.state.internals.TimeOrderedKeyValueBuffer;
 
 import static java.util.Objects.requireNonNull;
 
+@SuppressWarnings("deprecation") // Old PAPI. Needs to be migrated.
 public class KTableSuppressProcessorSupplier<K, V> implements KTableProcessorSupplier<K, V, V> {
     private final SuppressedInternal<K> suppress;
     private final String storeName;
@@ -49,11 +48,11 @@ public class KTableSuppressProcessorSupplier<K, V> implements KTableProcessorSup
         this.storeName = storeName;
         this.parentKTable = parentKTable;
         // The suppress buffer requires seeing the old values, to support the prior value view.
-        parentKTable.enableSendingOldValues();
+        parentKTable.enableSendingOldValues(true);
     }
 
     @Override
-    public Processor<K, Change<V>> get() {
+    public org.apache.kafka.streams.processor.Processor<K, Change<V>> get() {
         return new KTableSuppressProcessor<>(suppress, storeName);
     }
 
@@ -68,12 +67,11 @@ public class KTableSuppressProcessorSupplier<K, V> implements KTableProcessorSup
                 return new KTableValueGetter<K, V>() {
                     private TimeOrderedKeyValueBuffer<K, V> buffer;
 
-                    @SuppressWarnings("unchecked")
                     @Override
-                    public void init(final ProcessorContext context) {
+                    public void init(final org.apache.kafka.streams.processor.ProcessorContext context) {
                         parentGetter.init(context);
                         // the main processor is responsible for the buffer's lifecycle
-                        buffer = requireNonNull((TimeOrderedKeyValueBuffer<K, V>) context.getStateStore(storeName));
+                        buffer = requireNonNull(context.getStateStore(storeName));
                     }
 
                     @Override
@@ -89,8 +87,8 @@ public class KTableSuppressProcessorSupplier<K, V> implements KTableProcessorSup
 
                     @Override
                     public void close() {
-                        parentGetter.close();
                         // the main processor is responsible for the buffer's lifecycle
+                        parentGetter.close();
                     }
                 };
             }
@@ -107,11 +105,11 @@ public class KTableSuppressProcessorSupplier<K, V> implements KTableProcessorSup
     }
 
     @Override
-    public void enableSendingOldValues() {
-        parentKTable.enableSendingOldValues();
+    public boolean enableSendingOldValues(final boolean forceMaterialization) {
+        return parentKTable.enableSendingOldValues(forceMaterialization);
     }
 
-    private static final class KTableSuppressProcessor<K, V> implements Processor<K, Change<V>> {
+    private static final class KTableSuppressProcessor<K, V> extends org.apache.kafka.streams.processor.AbstractProcessor<K, Change<V>> {
         private final long maxRecords;
         private final long maxBytes;
         private final long suppressDurationMillis;
@@ -136,9 +134,9 @@ public class KTableSuppressProcessorSupplier<K, V> implements KTableProcessorSup
             safeToDropTombstones = suppress.safeToDropTombstones();
         }
 
-        @SuppressWarnings("unchecked")
         @Override
-        public void init(final ProcessorContext context) {
+        public void init(final org.apache.kafka.streams.processor.ProcessorContext context) {
+            super.init(context);
             internalProcessorContext = (InternalProcessorContext) context;
             suppressionEmitSensor = ProcessorNodeMetrics.suppressionEmitSensor(
                 Thread.currentThread().getName(),
@@ -147,8 +145,8 @@ public class KTableSuppressProcessorSupplier<K, V> implements KTableProcessorSup
                 internalProcessorContext.metrics()
             );
 
-            buffer = requireNonNull((TimeOrderedKeyValueBuffer<K, V>) context.getStateStore(storeName));
-            buffer.setSerdesIfNull((Serde<K>) context.keySerde(), (Serde<V>) context.valueSerde());
+            buffer = requireNonNull(context.getStateStore(storeName));
+            buffer.setSerdesIfNull(new SerdeGetter(context));
         }
 
         @Override
@@ -210,10 +208,6 @@ public class KTableSuppressProcessorSupplier<K, V> implements KTableProcessorSup
 
         private boolean shouldForward(final Change<V> value) {
             return value.newValue != null || !safeToDropTombstones;
-        }
-
-        @Override
-        public void close() {
         }
     }
 }

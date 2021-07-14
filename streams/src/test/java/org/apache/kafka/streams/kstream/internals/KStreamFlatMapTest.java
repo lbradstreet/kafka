@@ -41,6 +41,7 @@ import static org.junit.Assert.assertEquals;
 public class KStreamFlatMapTest {
     private final Properties props = StreamsTestUtils.getStreamsConfig(Serdes.Integer(), Serdes.String());
 
+    @SuppressWarnings("deprecation") // Old PAPI. Needs to be migrated.
     @Test
     public void testFlatMap() {
         final StreamsBuilder builder = new StreamsBuilder();
@@ -72,7 +73,7 @@ public class KStreamFlatMapTest {
             }
         }
 
-        assertEquals(6, supplier.theCapturedProcessor().processed.size());
+        assertEquals(6, supplier.theCapturedProcessor().processed().size());
 
         final KeyValueTimestamp[] expected = {new KeyValueTimestamp<>("10", "V1", 0),
             new KeyValueTimestamp<>("20", "V2", 0),
@@ -82,7 +83,7 @@ public class KStreamFlatMapTest {
             new KeyValueTimestamp<>("32", "V3", 0)};
 
         for (int i = 0; i < expected.length; i++) {
-            assertEquals(expected[i], supplier.theCapturedProcessor().processed.get(i));
+            assertEquals(expected[i], supplier.theCapturedProcessor().processed().get(i));
         }
     }
 }

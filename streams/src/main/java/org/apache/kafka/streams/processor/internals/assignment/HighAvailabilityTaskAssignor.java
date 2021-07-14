@@ -90,15 +90,12 @@ public class HighAvailabilityTaskAssignor implements TaskAssignor {
 
         assignStatelessActiveTasks(clientStates, diff(TreeSet::new, allTaskIds, statefulTasks));
 
-        // We shouldn't plan a probing rebalance if we _needed_ task movements, but couldn't do any
-        // due to being configured for no warmups.
-        final boolean probingRebalanceNeeded =
-            configs.maxWarmupReplicas > 0 && neededActiveTaskMovements + neededStandbyTaskMovements > 0;
+        final boolean probingRebalanceNeeded = neededActiveTaskMovements + neededStandbyTaskMovements > 0;
 
         log.info("Decided on assignment: " +
                      clientStates +
-                     " with " +
-                     (probingRebalanceNeeded ? "" : "no") +
+                     " with" +
+                     (probingRebalanceNeeded ? "" : " no") +
                      " followup probing rebalance.");
 
         return probingRebalanceNeeded;
@@ -149,7 +146,7 @@ public class HighAvailabilityTaskAssignor implements TaskAssignor {
             if (numRemainingStandbys > 0) {
                 log.warn("Unable to assign {} of {} standby tasks for task [{}]. " +
                              "There is not enough available capacity. You should " +
-                             "increase the number of threads and/or application instances " +
+                             "increase the number of application instances " +
                              "to maintain the requested number of standby replicas.",
                          numRemainingStandbys, numStandbyReplicas, task);
             }
@@ -241,16 +238,29 @@ public class HighAvailabilityTaskAssignor implements TaskAssignor {
         final Map<TaskId, SortedSet<UUID>> taskToCaughtUpClients = new HashMap<>();
 
         for (final TaskId task : statefulTasks) {
-
+            final TreeSet<UUID> caughtUpClients = new TreeSet<>();
             for (final Map.Entry<UUID, ClientState> clientEntry : clientStates.entrySet()) {
                 final UUID client = clientEntry.getKey();
                 final long taskLag = clientEntry.getValue().lagFor(task);
-                if (taskLag == Task.LATEST_OFFSET || taskLag <= acceptableRecoveryLag) {
-                    taskToCaughtUpClients.computeIfAbsent(task, ignored -> new TreeSet<>()).add(client);
+                if (activeRunning(taskLag) || unbounded(acceptableRecoveryLag) || acceptable(acceptableRecoveryLag, taskLag)) {
+                    caughtUpClients.add(client);
                 }
             }
+            taskToCaughtUpClients.put(task, caughtUpClients);
         }
 
         return taskToCaughtUpClients;
+    }
+
+    private static boolean unbounded(final long acceptableRecoveryLag) {
+        return acceptableRecoveryLag == Long.MAX_VALUE;
+    }
+
+    private static boolean acceptable(final long acceptableRecoveryLag, final long taskLag) {
+        return taskLag >= 0 && taskLag <= acceptableRecoveryLag;
+    }
+
+    private static boolean activeRunning(final long taskLag) {
+        return taskLag == Task.LATEST_OFFSET;
     }
 }
