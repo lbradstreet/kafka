@@ -60,5 +60,6 @@ class TimingWheelExpirationService(timer: Timer) extends ExpirationService {
 
   def shutdown(): Unit = {
     expirationReaper.shutdown()
+    timer.shutdown()
   }
 }

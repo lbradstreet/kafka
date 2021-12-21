@@ -164,6 +164,7 @@ public class KafkaRaftClient<T> implements RaftClient<T> {
     private final QuorumState quorum;
     private final RequestManager requestManager;
     private final RaftMetadataLogCleanerManager snapshotCleaner;
+    private final ExpirationService expirationService;
 
     private final Map<Listener<T>, ListenerContext> listenerContexts = new IdentityHashMap<>();
     private final ConcurrentLinkedQueue<Registration<T>> pendingRegistrations = new ConcurrentLinkedQueue<>();
@@ -225,6 +226,7 @@ public class KafkaRaftClient<T> implements RaftClient<T> {
         this.channel = channel;
         this.messageQueue = messageQueue;
         this.log = log;
+        this.expirationService = expirationService;
         this.memoryPool = memoryPool;
         this.fetchPurgatory = new ThresholdPurgatory<>(expirationService);
         this.appendPurgatory = new ThresholdPurgatory<>(expirationService);
@@ -2365,6 +2367,7 @@ public class KafkaRaftClient<T> implements RaftClient<T> {
         if (kafkaRaftMetrics != null) {
             kafkaRaftMetrics.close();
         }
+        expirationService.shutdown();
     }
 
     QuorumState quorum() {

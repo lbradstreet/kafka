@@ -29,4 +29,6 @@ public interface ExpirationService {
      * @return the completable future
      */
     <T> CompletableFuture<T> failAfter(long timeoutMs);
+
+    void shutdown();
 }

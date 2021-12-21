@@ -55,6 +55,9 @@ public class MockExpirationService implements ExpirationService, MockTime.Listen
         }
     }
 
+    @Override
+    public void shutdown() {}
+
     private static class ExpirationFuture<T> extends CompletableFuture<T> implements Comparable<ExpirationFuture<?>> {
         private final long id;
         private final long deadlineMs;
