@@ -52,12 +52,26 @@ ec2_subnet_id = nil
 # are running Vagrant from within that VPC as well.
 ec2_associate_public_ip = nil
 
+ebs_volume_type = 'gp3'
+
 jdk_major = '8'
 jdk_full = '8u202-linux-x64'
 
 local_config_file = File.join(File.dirname(__FILE__), "Vagrantfile.local")
 if File.exists?(local_config_file) then
   eval(File.read(local_config_file), binding, "Vagrantfile.local")
+end
+
+# override any instance type set by Vagrantfile.local or above via an environment variable
+if ENV['INSTANCE_TYPE'] then
+  ec2_instance_type = ENV['INSTANCE_TYPE']
+end
+
+# choose size based on overridden size
+if ec2_instance_type.start_with?("m3") then
+  ebs_volume_size = 20
+else
+  ebs_volume_size = 40
 end
 
 # TODO(ksweeney): RAM requirements are not empirical and can probably be significantly lowered.
@@ -121,6 +135,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     aws.ami = ec2_ami
     aws.security_groups = ec2_security_groups
     aws.subnet_id = ec2_subnet_id
+    aws.block_device_mapping = [{ 'DeviceName' => '/dev/sda1', 'Ebs.VolumeType' => ebs_volume_type, 'Ebs.VolumeSize' => ebs_volume_size }]
     # If a subnet is specified, default to turning on a public IP unless the
     # user explicitly specifies the option. Without a public IP, Vagrant won't
     # be able to SSH into the hosts unless Vagrant is also running in the VPC.
