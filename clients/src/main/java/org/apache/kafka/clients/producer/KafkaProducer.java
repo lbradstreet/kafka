@@ -899,8 +899,22 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             if (transactionManager != null && transactionManager.isTransactional())
                 transactionManager.maybeAddPartitionToTransaction(tp);
 
+            // First attempt with abortOnNewBatch=true. If the current batch is full and a new
+            // batch would be needed, the accumulator returns abortForNewBatch=true so we can
+            // notify the partitioner (giving it a chance to switch partitions) before allocating.
             RecordAccumulator.RecordAppendResult result = accumulator.append(tp, timestamp, serializedKey,
-                    serializedValue, headers, interceptCallback, remainingWaitMs);
+                    serializedValue, headers, interceptCallback, remainingWaitMs, true);
+            if (result.abortForNewBatch) {
+                int prevPartition = partition;
+                partitioner.onNewBatch(record.topic(), cluster, prevPartition);
+                partition = partition(record, serializedKey, serializedValue, cluster);
+                tp = new TopicPartition(record.topic(), partition);
+                interceptCallback = new InterceptorCallback<>(callback, this.interceptors, tp);
+
+                result = accumulator.append(tp, timestamp, serializedKey,
+                        serializedValue, headers, interceptCallback, remainingWaitMs, false);
+            }
+
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), partition);
                 this.sender.wakeup();

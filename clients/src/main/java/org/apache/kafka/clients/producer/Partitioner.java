@@ -40,6 +40,20 @@ public interface Partitioner extends Configurable, Closeable {
     public int partition(String topic, Object key, byte[] keyBytes, Object value, byte[] valueBytes, Cluster cluster);
 
     /**
+     * Notifies the partitioner a new batch is about to be created. When using the sticky
+     * partitioning strategy, this method can be used to switch the partition so that the
+     * new batch is assigned to a different partition than the previous one. Partitioner
+     * implementation can override this method to update partition selection state. The default
+     * implementation is a no-op.
+     *
+     * @param topic The topic name
+     * @param cluster The current cluster metadata
+     * @param prevPartition The partition of the batch that was just completed
+     */
+    default public void onNewBatch(String topic, Cluster cluster, int prevPartition) {
+    }
+
+    /**
      * This is called when partitioner is closed.
      */
     public void close();

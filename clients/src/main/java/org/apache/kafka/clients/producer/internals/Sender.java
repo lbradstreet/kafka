@@ -330,13 +330,19 @@ public class Sender implements Runnable {
         // remove any nodes we aren't ready to send to
         Iterator<Node> iter = result.readyNodes.iterator();
         long notReadyTimeout = Long.MAX_VALUE;
+        boolean anyNodeNotReady = false;
         while (iter.hasNext()) {
             Node node = iter.next();
             if (!this.client.ready(node, now)) {
                 iter.remove();
                 notReadyTimeout = Math.min(notReadyTimeout, this.client.pollDelayMs(node, now));
+                anyNodeNotReady = true;
             }
         }
+
+        // Signal the accumulator when nodes with ready data can't send because inflight
+        // is full. This triggers expanded batch allocation to reduce per-batch overhead.
+        this.accumulator.setNodeInflightFull(anyNodeNotReady);
 
         // create produce requests
         Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(cluster, result.readyNodes, this.maxRequestSize, now);

@@ -33,7 +33,13 @@ import org.apache.kafka.common.utils.Utils;
  * <ul>
  * <li>If a partition is specified in the record, use it
  * <li>If no partition is specified but a key is present choose a partition based on a hash of the key
- * <li>If no partition or key is present choose a partition in a round-robin fashion
+ * <li>If no partition or key is present choose the sticky partition that changes when the batch is full
+ * </ul>
+ *
+ * For records with no key, the partitioner uses a sticky strategy: it picks a partition and continues
+ * sending to it until the current batch is full. When the accumulator signals that a new batch is needed,
+ * {@link #onNewBatch} is called, causing the partitioner to switch to the next available partition.
+ * This fills batches more completely than pure round-robin, leading to fewer, larger requests.
  */
 public class DefaultPartitioner implements Partitioner {
 
@@ -55,7 +61,7 @@ public class DefaultPartitioner implements Partitioner {
         List<PartitionInfo> partitions = cluster.partitionsForTopic(topic);
         int numPartitions = partitions.size();
         if (keyBytes == null) {
-            int nextValue = nextValue(topic);
+            int nextValue = stickyPartitionValue(topic);
             List<PartitionInfo> availablePartitions = cluster.availablePartitionsForTopic(topic);
             if (availablePartitions.size() > 0) {
                 int part = Utils.toPositive(nextValue) % availablePartitions.size();
@@ -70,7 +76,12 @@ public class DefaultPartitioner implements Partitioner {
         }
     }
 
-    private int nextValue(String topic) {
+    /**
+     * Get the current sticky value for the given topic without advancing the counter.
+     * The counter only advances when {@link #onNewBatch} is called, making the partitioner
+     * "sticky" -- it keeps returning the same partition until the batch is full.
+     */
+    private int stickyPartitionValue(String topic) {
         AtomicInteger counter = topicCounterMap.get(topic);
         if (null == counter) {
             counter = new AtomicInteger(ThreadLocalRandom.current().nextInt());
@@ -79,7 +90,18 @@ public class DefaultPartitioner implements Partitioner {
                 counter = currentCounter;
             }
         }
-        return counter.getAndIncrement();
+        return counter.get();
+    }
+
+    /**
+     * Called when the accumulator determines a new batch is needed. Advances the sticky counter
+     * so the next partition() call for keyless records will return a different partition.
+     */
+    public void onNewBatch(String topic, Cluster cluster, int prevPartition) {
+        AtomicInteger counter = topicCounterMap.get(topic);
+        if (counter != null) {
+            counter.incrementAndGet();
+        }
     }
 
     public void close() {}

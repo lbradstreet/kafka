@@ -993,6 +993,133 @@ public class RecordAccumulatorTest {
     }
 
 
+    @Test
+    public void testAbortForNewBatch() throws Exception {
+        int batchSize = 1025;
+        RecordAccumulator accum = createTestRecordAccumulator(
+                batchSize + DefaultRecordBatch.RECORD_BATCH_OVERHEAD, 10L * batchSize, CompressionType.NONE, 10L);
+
+        // Fill the first batch
+        int appends = expectedNumAppends(batchSize);
+        for (int i = 0; i < appends; i++) {
+            accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs, false);
+        }
+
+        // The next append with abortOnNewBatch=true should signal to abort
+        RecordAccumulator.RecordAppendResult result = accum.append(tp1, 0L, key, value,
+                Record.EMPTY_HEADERS, null, maxBlockTimeMs, true);
+        assertTrue("Should signal abort for new batch", result.abortForNewBatch);
+        assertFalse("Should not create a new batch", result.newBatchCreated);
+
+        // The same append with abortOnNewBatch=false should actually allocate the batch
+        result = accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs, false);
+        assertFalse("Should not signal abort", result.abortForNewBatch);
+        assertTrue("Should create a new batch", result.newBatchCreated);
+        assertNotNull("Should have a future", result.future);
+    }
+
+    @Test
+    public void testAbortForNewBatchNotTriggeredWhenBatchHasRoom() throws Exception {
+        int batchSize = 1025;
+        RecordAccumulator accum = createTestRecordAccumulator(
+                batchSize + DefaultRecordBatch.RECORD_BATCH_OVERHEAD, 10L * batchSize, CompressionType.NONE, 10L);
+
+        RecordAccumulator.RecordAppendResult result = accum.append(tp1, 0L, key, value,
+                Record.EMPTY_HEADERS, null, maxBlockTimeMs, true);
+        assertFalse("Should not abort when batch has room", result.abortForNewBatch);
+        assertNotNull("Should have a future", result.future);
+    }
+
+    @Test
+    public void testExpandedBatchAllocationWhenInflightFull() throws Exception {
+        int batchSize = 1025;
+        int totalSize = 100 * batchSize;
+        RecordAccumulator accum = createTestRecordAccumulator(
+                batchSize + DefaultRecordBatch.RECORD_BATCH_OVERHEAD, totalSize, CompressionType.NONE, 10L);
+
+        // Set inflight full signal
+        accum.setNodeInflightFull(true);
+
+        // Fill the first batch to trigger a new batch allocation
+        int appends = expectedNumAppends(batchSize);
+        for (int i = 0; i < appends; i++) {
+            accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+        }
+        // This should allocate an expanded batch
+        accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+
+        // The new batch should be able to hold more records than a normal batch
+        Deque<ProducerBatch> deque = accum.batches().get(tp1);
+        assertEquals(2, deque.size());
+
+        // Verify the expanded batch can hold more records than a normal-sized batch
+        int expandedAppends = 0;
+        while (true) {
+            RecordAccumulator.RecordAppendResult r = accum.append(tp1, 0L, key, value,
+                    Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+            if (r.newBatchCreated) break;
+            expandedAppends++;
+        }
+        // The expanded batch (4x) should hold roughly 4x as many records minus 1 (the one already in it)
+        assertTrue("Expanded batch should hold significantly more records than normal: " + expandedAppends + " vs " + appends,
+                expandedAppends > appends * 2);
+    }
+
+    @Test
+    public void testNormalBatchSizeWhenInflightNotFull() throws Exception {
+        int batchSize = 1025;
+        RecordAccumulator accum = createTestRecordAccumulator(
+                batchSize + DefaultRecordBatch.RECORD_BATCH_OVERHEAD, 10L * batchSize, CompressionType.NONE, 10L);
+
+        int appends = expectedNumAppends(batchSize);
+        for (int i = 0; i < appends; i++) {
+            accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+        }
+        accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+
+        Deque<ProducerBatch> deque = accum.batches().get(tp1);
+        assertEquals(2, deque.size());
+
+        // Fill the second batch -- should hold roughly the same number as the first
+        int secondBatchAppends = 0;
+        while (true) {
+            RecordAccumulator.RecordAppendResult r = accum.append(tp1, 0L, key, value,
+                    Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+            if (r.newBatchCreated) break;
+            secondBatchAppends++;
+        }
+        assertTrue("Normal batch should hold similar records: " + secondBatchAppends + " vs " + appends,
+                Math.abs(secondBatchAppends - appends) <= 1);
+    }
+
+    @Test
+    public void testInflightFullSignalCanBeCleared() throws Exception {
+        int batchSize = 1025;
+        int totalSize = 100 * batchSize;
+        RecordAccumulator accum = createTestRecordAccumulator(
+                batchSize + DefaultRecordBatch.RECORD_BATCH_OVERHEAD, totalSize, CompressionType.NONE, 10L);
+
+        accum.setNodeInflightFull(true);
+        accum.setNodeInflightFull(false);
+
+        // Should allocate normal size batch
+        int appends = expectedNumAppends(batchSize);
+        for (int i = 0; i < appends; i++) {
+            accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+        }
+        accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+
+        int secondBatchAppends = 0;
+        while (true) {
+            RecordAccumulator.RecordAppendResult r = accum.append(tp1, 0L, key, value,
+                    Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+            if (r.newBatchCreated) break;
+            secondBatchAppends++;
+        }
+        assertTrue("After clearing inflight full, batch should be normal size: " + secondBatchAppends + " vs " + appends,
+                Math.abs(secondBatchAppends - appends) <= 1);
+    }
+
     private RecordAccumulator createTestRecordAccumulator(int batchSize, long totalSize, CompressionType type, long lingerMs) {
         long deliveryTimeoutMs = 3200L;
         return createTestRecordAccumulator(deliveryTimeoutMs, batchSize, totalSize, type, lingerMs);

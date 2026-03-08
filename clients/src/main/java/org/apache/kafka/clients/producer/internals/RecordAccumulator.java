@@ -85,6 +85,8 @@ public final class RecordAccumulator {
     private int drainIndex;
     private final TransactionManager transactionManager;
     private long nextBatchExpiryTimeMs = Long.MAX_VALUE; // the earliest time (absolute) a batch will expire.
+    private volatile boolean nodeInflightFull;
+    private static final int BATCH_EXPANSION_FACTOR = 4;
 
     /**
      * Create a new record accumulator
@@ -187,6 +189,17 @@ public final class RecordAccumulator {
                                      Header[] headers,
                                      Callback callback,
                                      long maxTimeToBlock) throws InterruptedException {
+        return append(tp, timestamp, key, value, headers, callback, maxTimeToBlock, false);
+    }
+
+    public RecordAppendResult append(TopicPartition tp,
+                                     long timestamp,
+                                     byte[] key,
+                                     byte[] value,
+                                     Header[] headers,
+                                     Callback callback,
+                                     long maxTimeToBlock,
+                                     boolean abortOnNewBatch) throws InterruptedException {
         // We keep track of the number of appending thread to make sure we do not miss batches in
         // abortIncompleteBatches().
         appendsInProgress.incrementAndGet();
@@ -204,8 +217,17 @@ public final class RecordAccumulator {
             }
 
             // we don't have an in-progress record batch try to allocate a new batch
+            if (abortOnNewBatch) {
+                // Return without allocating a new batch so the caller can call onNewBatch()
+                // on the partitioner and potentially retry with a different partition.
+                return new RecordAppendResult(null, false, false, true);
+            }
+
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
             int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
+            if (nodeInflightFull) {
+                size = Math.max(size, this.batchSize * BATCH_EXPANSION_FACTOR);
+            }
             log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
             buffer = free.allocate(size, maxTimeToBlock);
             synchronized (dq) {
@@ -228,7 +250,7 @@ public final class RecordAccumulator {
 
                 // Don't deallocate this buffer in the finally block as it's being used in the record batch
                 buffer = null;
-                return new RecordAppendResult(future, dq.size() > 1 || batch.isFull(), true);
+                return new RecordAppendResult(future, dq.size() > 1 || batch.isFull(), true, false);
             }
         } finally {
             if (buffer != null)
@@ -261,7 +283,7 @@ public final class RecordAccumulator {
             if (future == null)
                 last.closeForRecordAppends();
             else
-                return new RecordAppendResult(future, deque.size() > 1 || last.isFull(), false);
+                return new RecordAppendResult(future, deque.size() > 1 || last.isFull(), false, false);
         }
         return null;
     }
@@ -774,6 +796,14 @@ public final class RecordAccumulator {
     }
 
     /**
+     * Update the inflight-full signal. When set, new batch allocations will use an expanded
+     * buffer size to amortize per-batch overhead during backpressure.
+     */
+    public void setNodeInflightFull(boolean inflightFull) {
+        this.nodeInflightFull = inflightFull;
+    }
+
+    /**
      * Close this accumulator and force all the record buffers to be drained
      */
     public void close() {
@@ -787,11 +817,13 @@ public final class RecordAccumulator {
         public final FutureRecordMetadata future;
         public final boolean batchIsFull;
         public final boolean newBatchCreated;
+        public final boolean abortForNewBatch;
 
-        public RecordAppendResult(FutureRecordMetadata future, boolean batchIsFull, boolean newBatchCreated) {
+        public RecordAppendResult(FutureRecordMetadata future, boolean batchIsFull, boolean newBatchCreated, boolean abortForNewBatch) {
             this.future = future;
             this.batchIsFull = batchIsFull;
             this.newBatchCreated = newBatchCreated;
+            this.abortForNewBatch = abortForNewBatch;
         }
     }
 
