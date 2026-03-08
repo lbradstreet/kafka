@@ -339,7 +339,7 @@ public class RecordAccumulatorTest {
         int batchSize = 1024 + DefaultRecordBatch.RECORD_BATCH_OVERHEAD;
         String metricGrpName = "producer-metrics";
 
-        final RecordAccumulator accum = new RecordAccumulator(logContext, batchSize,
+        final RecordAccumulator accum = new RecordAccumulator(logContext, batchSize, batchSize,
             CompressionType.NONE, lingerMs, retryBackoffMs, deliveryTimeoutMs, metrics, metricGrpName, time, new ApiVersions(), null,
             new BufferPool(totalSize, batchSize, metrics, time, metricGrpName));
 
@@ -710,6 +710,7 @@ public class RecordAccumulatorTest {
         apiVersions.update("foobar", NodeApiVersions.create(Arrays.asList(new ApiVersionsResponse.ApiVersion(ApiKeys.PRODUCE.id,
                 (short) 0, (short) 2))));
         RecordAccumulator accum = new RecordAccumulator(logContext, batchSize + DefaultRecordBatch.RECORD_BATCH_OVERHEAD,
+            batchSize + DefaultRecordBatch.RECORD_BATCH_OVERHEAD,
             CompressionType.NONE, lingerMs, retryBackoffMs, deliveryTimeoutMs, metrics, metricGrpName, time, apiVersions, new TransactionManager(),
             new BufferPool(totalSize, batchSize, metrics, time, metricGrpName));
         accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, 0);
@@ -993,6 +994,111 @@ public class RecordAccumulatorTest {
     }
 
 
+    @Test
+    public void testBatchInitialSizeReducesAllocation() throws Exception {
+        // With batchInitialSize < batchSize, new batches should allocate less memory
+        int batchSize = 16384;
+        int batchInitialSize = 1024;
+        long totalSize = 64 * 1024;
+        String metricGrpName = "producer-metrics";
+
+        RecordAccumulator accum = new RecordAccumulator(
+            logContext, batchSize, batchInitialSize, CompressionType.NONE, 0L, 100L, 3200L,
+            metrics, metricGrpName, time, new ApiVersions(), null,
+            new BufferPool(totalSize, batchSize, metrics, time, metricGrpName));
+
+        // Append a small record to a partition
+        accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+
+        // With batchInitialSize=1024, the available memory should decrease by roughly 1024,
+        // not by the full batchSize (16384)
+        long availableAfter = accum.bufferPoolAvailableMemory();
+        // Allow some overhead for record batch headers, but should be much less than batchSize
+        assertTrue("Available memory should reflect smaller allocation (available=" + availableAfter
+                + ", totalSize=" + totalSize + ", batchSize=" + batchSize + ")",
+            totalSize - availableAfter < batchSize);
+    }
+
+    @Test
+    public void testAdaptiveBatchSizingUnderMemoryPressure() throws Exception {
+        // With limited total memory and many partitions, batch allocation should adapt
+        int batchSize = 4096;
+        // total memory can only hold 2 full batches
+        long totalSize = batchSize * 2;
+        String metricGrpName = "producer-metrics";
+
+        RecordAccumulator accum = new RecordAccumulator(
+            logContext, batchSize, batchSize, CompressionType.NONE, 0L, 100L, 3200L,
+            metrics, metricGrpName, time, new ApiVersions(), null,
+            new BufferPool(totalSize, batchSize, metrics, time, metricGrpName));
+
+        // Append to 3 different partitions - without adaptive sizing this would
+        // require 3 * batchSize = 12288 bytes, but we only have 8192
+        accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+        accum.append(tp2, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+        // Third partition should still succeed due to adaptive sizing
+        accum.append(tp3, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+
+        // Verify all three partitions have batches
+        assertEquals(3, accum.batches().size());
+        assertNotNull(accum.batches().get(tp1));
+        assertNotNull(accum.batches().get(tp2));
+        assertNotNull(accum.batches().get(tp3));
+    }
+
+    @Test
+    public void testEffectiveBatchSizeWithPlentyOfMemory() {
+        // When memory is plentiful, effectiveBatchSize should return batchInitialSize
+        int batchSize = 16384;
+        int batchInitialSize = 8192;
+        long totalSize = 1024 * 1024; // 1MB - plenty of memory
+        String metricGrpName = "producer-metrics";
+
+        RecordAccumulator accum = new RecordAccumulator(
+            logContext, batchSize, batchInitialSize, CompressionType.NONE, 0L, 100L, 3200L,
+            metrics, metricGrpName, time, new ApiVersions(), null,
+            new BufferPool(totalSize, batchSize, metrics, time, metricGrpName));
+
+        int estimatedRecordSize = 100;
+        int effective = accum.effectiveBatchSize(estimatedRecordSize);
+        assertEquals("With plenty of memory, should use batchInitialSize", batchInitialSize, effective);
+    }
+
+    @Test
+    public void testEffectiveBatchSizeNeverBelowRecordSize() {
+        // effectiveBatchSize should never return less than the estimated record size
+        int batchSize = 16384;
+        int batchInitialSize = 100;
+        long totalSize = 200; // Very tight memory
+        String metricGrpName = "producer-metrics";
+
+        RecordAccumulator accum = new RecordAccumulator(
+            logContext, batchSize, batchInitialSize, CompressionType.NONE, 0L, 100L, 3200L,
+            metrics, metricGrpName, time, new ApiVersions(), null,
+            new BufferPool(totalSize, batchSize, metrics, time, metricGrpName));
+
+        int estimatedRecordSize = 500;
+        int effective = accum.effectiveBatchSize(estimatedRecordSize);
+        assertTrue("Effective batch size should be at least the record size",
+            effective >= estimatedRecordSize);
+    }
+
+    @Test
+    public void testDefaultBatchInitialSizePreservesExistingBehavior() throws Exception {
+        // When batchInitialSize equals batchSize (default), behavior should be unchanged
+        int batchSize = 1025 + DefaultRecordBatch.RECORD_BATCH_OVERHEAD;
+        long totalSize = 10L * batchSize;
+
+        RecordAccumulator accum = createTestRecordAccumulator(batchSize, totalSize, CompressionType.NONE, 10L);
+
+        accum.append(tp1, 0L, key, value, Record.EMPTY_HEADERS, null, maxBlockTimeMs);
+
+        long availableAfter = accum.bufferPoolAvailableMemory();
+        // With default settings, a full batchSize should be allocated
+        assertEquals("With default settings, full batchSize should be allocated",
+            totalSize - batchSize, availableAfter);
+    }
+
     private RecordAccumulator createTestRecordAccumulator(int batchSize, long totalSize, CompressionType type, long lingerMs) {
         long deliveryTimeoutMs = 3200L;
         return createTestRecordAccumulator(deliveryTimeoutMs, batchSize, totalSize, type, lingerMs);
@@ -1008,6 +1114,7 @@ public class RecordAccumulatorTest {
 
         return new RecordAccumulator(
             logContext,
+            batchSize,
             batchSize,
             type,
             lingerMs,

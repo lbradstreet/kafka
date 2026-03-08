@@ -394,8 +394,17 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             int deliveryTimeoutMs = configureDeliveryTimeout(config, log);
 
             this.apiVersions = new ApiVersions();
+            int batchSize = config.getInt(ProducerConfig.BATCH_SIZE_CONFIG);
+            int batchInitialSize = config.getInt(ProducerConfig.BATCH_INITIAL_SIZE_CONFIG);
+            // -1 means use batchSize; otherwise cap at batchSize
+            if (batchInitialSize < 0) {
+                batchInitialSize = batchSize;
+            } else {
+                batchInitialSize = Math.min(batchInitialSize, batchSize);
+            }
             this.accumulator = new RecordAccumulator(logContext,
-                    config.getInt(ProducerConfig.BATCH_SIZE_CONFIG),
+                    batchSize,
+                    batchInitialSize,
                     this.compressionType,
                     config.getInt(ProducerConfig.LINGER_MS_CONFIG),
                     retryBackoffMs,
@@ -405,7 +414,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                     time,
                     apiVersions,
                     transactionManager,
-                    new BufferPool(this.totalMemorySize, config.getInt(ProducerConfig.BATCH_SIZE_CONFIG), metrics, time, PRODUCER_METRIC_GROUP_NAME));
+                    new BufferPool(this.totalMemorySize, batchSize, metrics, time, PRODUCER_METRIC_GROUP_NAME));
             List<InetSocketAddress> addresses = ClientUtils.parseAndValidateAddresses(
                     config.getList(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG),
                     config.getString(ProducerConfig.CLIENT_DNS_LOOKUP_CONFIG));

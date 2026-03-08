@@ -73,6 +73,15 @@ public class ProducerConfig extends AbstractConfig {
                                                  + "batching entirely). A very large batch size may use memory a bit more wastefully as we will always allocate a "
                                                  + "buffer of the specified batch size in anticipation of additional records.";
 
+    /** <code>batch.initial.size</code> */
+    public static final String BATCH_INITIAL_SIZE_CONFIG = "batch.initial.size";
+    private static final String BATCH_INITIAL_SIZE_DOC = "The initial size in bytes of the buffer allocated for a partition when a new batch is created. "
+                                                         + "When set to -1 (default), the full <code>" + BATCH_SIZE_CONFIG + "</code> is used as the initial allocation. "
+                                                         + "Setting this to a value smaller than <code>" + BATCH_SIZE_CONFIG + "</code> can significantly reduce memory usage "
+                                                         + "when producing small records to a large number of partitions, at the cost of reduced batching efficiency. "
+                                                         + "The producer will also adaptively reduce batch allocation size under memory pressure regardless of this setting. "
+                                                         + "Values larger than <code>" + BATCH_SIZE_CONFIG + "</code> will be capped to <code>" + BATCH_SIZE_CONFIG + "</code>.";
+
     /** <code>acks</code> */
     public static final String ACKS_CONFIG = "acks";
     private static final String ACKS_DOC = "The number of acknowledgments the producer requires the leader to have received before considering a request complete. This controls the "
@@ -260,6 +269,7 @@ public class ProducerConfig extends AbstractConfig {
                                         ACKS_DOC)
                                 .define(COMPRESSION_TYPE_CONFIG, Type.STRING, "none", Importance.HIGH, COMPRESSION_TYPE_DOC)
                                 .define(BATCH_SIZE_CONFIG, Type.INT, 16384, atLeast(0), Importance.MEDIUM, BATCH_SIZE_DOC)
+                                .define(BATCH_INITIAL_SIZE_CONFIG, Type.INT, -1, atLeast(-1), Importance.LOW, BATCH_INITIAL_SIZE_DOC)
                                 .define(LINGER_MS_CONFIG, Type.INT, 0, atLeast(0), Importance.MEDIUM, LINGER_MS_DOC)
                                 .define(DELIVERY_TIMEOUT_MS_CONFIG, Type.INT, 120 * 1000, atLeast(0), Importance.MEDIUM, DELIVERY_TIMEOUT_MS_DOC)
                                 .define(CLIENT_ID_CONFIG, Type.STRING, "", Importance.MEDIUM, CommonClientConfigs.CLIENT_ID_DOC)

@@ -71,6 +71,7 @@ public final class RecordAccumulator {
     private final AtomicInteger flushesInProgress;
     private final AtomicInteger appendsInProgress;
     private final int batchSize;
+    private final int batchInitialSize;
     private final CompressionType compression;
     private final long lingerMs;
     private final long retryBackoffMs;
@@ -105,6 +106,7 @@ public final class RecordAccumulator {
      */
     public RecordAccumulator(LogContext logContext,
                              int batchSize,
+                             int batchInitialSize,
                              CompressionType compression,
                              long lingerMs,
                              long retryBackoffMs,
@@ -121,6 +123,7 @@ public final class RecordAccumulator {
         this.flushesInProgress = new AtomicInteger(0);
         this.appendsInProgress = new AtomicInteger(0);
         this.batchSize = batchSize;
+        this.batchInitialSize = batchInitialSize;
         this.compression = compression;
         this.lingerMs = lingerMs;
         this.retryBackoffMs = retryBackoffMs;
@@ -205,8 +208,10 @@ public final class RecordAccumulator {
 
             // we don't have an in-progress record batch try to allocate a new batch
             byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
-            int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers));
-            log.trace("Allocating a new {} byte message buffer for topic {} partition {}", size, tp.topic(), tp.partition());
+            int estimatedRecordSize = AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression, key, value, headers);
+            int size = Math.max(effectiveBatchSize(estimatedRecordSize), estimatedRecordSize);
+            log.trace("Allocating a new {} byte message buffer for topic {} partition {} (batchSize={}, batchInitialSize={})",
+                    size, tp.topic(), tp.partition(), this.batchSize, this.batchInitialSize);
             buffer = free.allocate(size, maxTimeToBlock);
             synchronized (dq) {
                 // Need to check if producer is closed again after grabbing the dequeue lock.
@@ -243,6 +248,36 @@ public final class RecordAccumulator {
                 "support the required message format (v2). The broker must be version 0.11 or later.");
         }
         return MemoryRecords.builder(buffer, maxUsableMagic, compression, TimestampType.CREATE_TIME, 0L);
+    }
+
+    /**
+     * Calculate the effective batch size for a new batch allocation.
+     * <p>
+     * This method implements adaptive batch sizing to reduce memory waste when producing
+     * small records to many partitions. It uses two mechanisms:
+     * <ol>
+     * <li>The {@code batchInitialSize} config allows users to set an initial allocation
+     *     smaller than {@code batchSize}</li>
+     * <li>Under memory pressure (when available memory cannot support a full-sized batch
+     *     for each active partition), the allocation is further reduced proportionally</li>
+     * </ol>
+     *
+     * @param estimatedRecordSize the estimated size of the record being appended
+     * @return the effective batch size to use for allocation
+     */
+    // Visible for testing
+    int effectiveBatchSize(int estimatedRecordSize) {
+        int targetSize = this.batchInitialSize;
+        long availableMemory = free.availableMemory();
+        int activePartitions = Math.max(1, batches.size());
+
+        // Under memory pressure, reduce further to avoid exhaustion
+        if (availableMemory < (long) targetSize * activePartitions) {
+            int pressureSize = (int) Math.max(estimatedRecordSize, availableMemory / activePartitions);
+            targetSize = Math.min(targetSize, pressureSize);
+        }
+
+        return Math.max(targetSize, estimatedRecordSize);
     }
 
     /**
