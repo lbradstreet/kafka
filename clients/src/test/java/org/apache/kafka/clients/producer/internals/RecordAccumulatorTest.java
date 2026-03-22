@@ -1889,4 +1889,44 @@ public class RecordAccumulatorTest {
             "awaitAllDependents() should complete after all dependents are done");
         assertFalse(awaitThread.isAlive(), "await thread should have completed");
     }
+
+    @Test
+    public void testExpandedBatchingUnderBackpressure() throws Exception {
+        int batchSize = 1025;
+        int totalBatchSize = batchSize + DefaultRecordBatch.RECORD_BATCH_OVERHEAD;
+
+        RecordAccumulator accum = createTestRecordAccumulator(
+                totalBatchSize, 10L * totalBatchSize, Compression.NONE, 10);
+
+        // Append a record without backpressure — batch should use normal batchSize
+        accum.append(topic, partition1, 0L, key, value, Record.EMPTY_HEADERS, null,
+                maxBlockTimeMs, time.milliseconds(), metadataCache.cluster());
+        Deque<ProducerBatch> partitionBatches = accum.getDeque(tp1);
+        assertEquals(1, partitionBatches.size());
+        int normalCapacity = partitionBatches.peekFirst().initialCapacity();
+        assertEquals(totalBatchSize, normalCapacity,
+                "Batch should be allocated at the configured batch size");
+
+        // Now simulate backpressure: set nodeInflightFull flag and append to a different partition
+        accum.setNodeInflightFull(true);
+
+        accum.append(topic, partition2, 0L, key, value, Record.EMPTY_HEADERS, null,
+                maxBlockTimeMs, time.milliseconds(), metadataCache.cluster());
+        Deque<ProducerBatch> backpressureBatches = accum.getDeque(tp2);
+        assertEquals(1, backpressureBatches.size());
+        int expandedCapacity = backpressureBatches.peekFirst().initialCapacity();
+        assertEquals(totalBatchSize * 4, expandedCapacity,
+                "Batch should be allocated at 4x the configured batch size under backpressure");
+
+        // Clear the flag and append to a third partition — should go back to normal size
+        accum.setNodeInflightFull(false);
+
+        accum.append(topic, partition3, 0L, key, value, Record.EMPTY_HEADERS, null,
+                maxBlockTimeMs, time.milliseconds(), metadataCache.cluster());
+        Deque<ProducerBatch> restoredBatches = accum.getDeque(tp3);
+        assertEquals(1, restoredBatches.size());
+        int restoredCapacity = restoredBatches.peekFirst().initialCapacity();
+        assertEquals(totalBatchSize, restoredCapacity,
+                "Batch should return to normal size when backpressure clears");
+    }
 }

@@ -89,6 +89,7 @@ public class RecordAccumulator {
     private final Map<String, Integer> nodesDrainIndex;
     private final TransactionManager transactionManager;
     private long nextBatchExpiryTimeMs = Long.MAX_VALUE; // the earliest time (absolute) a batch will expire.
+    private volatile boolean nodeInflightFull;
 
     /**
      * Create a new record accumulator
@@ -326,7 +327,8 @@ public class RecordAccumulator {
                 }
 
                 if (buffer == null) {
-                    int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(
+                    int effectiveBatchSize = nodeInflightFull ? this.batchSize * 4 : this.batchSize;
+                    int size = Math.max(effectiveBatchSize, AbstractRecords.estimateSizeInBytesUpperBound(
                             RecordBatch.CURRENT_MAGIC_VALUE, compression.type(), key, value, headers));
                     log.trace("Allocating a new {} byte message buffer for topic {} partition {} with remaining timeout {}ms", size, topic, effectivePartition, maxTimeToBlock);
                     // This call may block if we exhausted buffer space.
@@ -1195,6 +1197,14 @@ public class RecordAccumulator {
 
     public void unmutePartition(TopicPartition tp) {
         muted.remove(tp);
+    }
+
+    /**
+     * Set whether any node has full inflight requests. When true, new batch allocations
+     * will use an expanded size (batchSize * 4) to improve throughput under backpressure.
+     */
+    public void setNodeInflightFull(boolean nodeInflightFull) {
+        this.nodeInflightFull = nodeInflightFull;
     }
 
     /**

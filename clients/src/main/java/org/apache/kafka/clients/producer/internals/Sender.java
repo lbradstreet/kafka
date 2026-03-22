@@ -398,6 +398,7 @@ public class Sender implements Runnable {
         // remove any nodes we aren't ready to send to
         Iterator<Node> iter = result.readyNodes.iterator();
         long notReadyTimeout = Long.MAX_VALUE;
+        boolean nodeInflightFull = false;
         while (iter.hasNext()) {
             Node node = iter.next();
             if (!this.client.ready(node, now)) {
@@ -407,12 +408,14 @@ public class Sender implements Runnable {
                 this.accumulator.updateNodeLatencyStats(node.id(), now, false);
                 iter.remove();
                 notReadyTimeout = Math.min(notReadyTimeout, this.client.pollDelayMs(node, now));
+                nodeInflightFull = true;
             } else {
                 // Update both readyTimeMs and drainTimeMs, this would "reset" the node
                 // latency.
                 this.accumulator.updateNodeLatencyStats(node.id(), now, true);
             }
         }
+        this.accumulator.setNodeInflightFull(nodeInflightFull);
 
         // create produce requests
         Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(metadataSnapshot, result.readyNodes, this.maxRequestSize, now);
