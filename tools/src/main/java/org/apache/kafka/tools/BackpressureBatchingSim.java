@@ -17,7 +17,9 @@
 package org.apache.kafka.tools;
 
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Deque;
+import java.util.List;
 import java.util.PriorityQueue;
 
 /**
@@ -26,6 +28,9 @@ import java.util.PriorityQueue;
  *
  * Models: record arrival, batch accumulation, inflight slot management,
  * RTT-based response completion, and the nodeInflightFull flag.
+ *
+ * Sweeps across arrival rates to show behavior when expanded batches
+ * are partially filled vs fully filled.
  */
 public class BackpressureBatchingSim {
 
@@ -35,20 +40,55 @@ public class BackpressureBatchingSim {
     static final int MAX_INFLIGHT = 5;
     static final int RTT_MS = 100;                  // 100 ms round-trip
     static final int RECORD_SIZE = 100;             // bytes per record
-    static final int RECORD_ARRIVAL_RATE = 50_000;  // records/sec arriving from application
-    static final int SIM_DURATION_MS = 5_000;       // simulate 5 seconds
+    static final int SIM_DURATION_MS = 10_000;      // simulate 10 seconds
     static final int SENDER_INTERVAL_MS = 1;        // sender thread polls every 1 ms
+    static final int LINGER_MS = 5;                 // linger time before sending partial batch
+
+    // Records per 16KB batch: 16384/100 = ~163
+    // Max throughput at 16KB batches: 5 * 163 / 0.1s = 8150 rec/s = ~0.78 MB/s
+    // Max throughput at 64KB batches: 5 * 655 / 0.1s = 32750 rec/s = ~3.12 MB/s
+
+    // Sweep from well below baseline capacity to well above expanded capacity
+    static final int[] ARRIVAL_RATES = {
+        2_000,    // well below pipeline capacity — no backpressure
+        5_000,    // approaching baseline capacity
+        8_000,    // at baseline capacity — pipeline starts saturating
+        10_000,   // just above baseline cap — light backpressure
+        15_000,   // moderate backpressure — expanded batches partially filled
+        20_000,   // heavier backpressure — expanded batches ~60% filled
+        30_000,   // near expanded capacity — batches mostly filled
+        50_000,   // above expanded capacity — batches fully filled
+        80_000,   // heavily overloaded
+    };
 
     public static void main(String[] args) {
         System.out.println("=== Kafka Producer Backpressure Batching Simulation ===");
+        System.out.println("=== Rate Sweep: Partial vs Full Expanded Batches    ===");
         System.out.println();
         printConfig();
         System.out.println();
 
-        SimResult baseline = runSimulation(false);
-        SimResult expanded = runSimulation(true);
+        // --- Section 1: Rate sweep comparison table ---
+        printRateSweep();
 
-        printComparison(baseline, expanded);
+        // --- Section 2: Detailed comparison at a rate that doesn't fill expanded batches ---
+        System.out.println();
+        System.out.println("═══════════════════════════════════════════════════════════════════════════");
+        System.out.println("DETAILED VIEW: 10,000 records/sec (just above baseline cap, partial fill)");
+        System.out.println("═══════════════════════════════════════════════════════════════════════════");
+        System.out.println();
+        SimResult base10k = runSimulation(false, 10_000);
+        SimResult exp10k = runSimulation(true, 10_000);
+        printDetailedComparison(base10k, exp10k);
+
+        System.out.println();
+        System.out.println("═══════════════════════════════════════════════════════════════════════════");
+        System.out.println("DETAILED VIEW: 50,000 records/sec (well above cap, full fill)");
+        System.out.println("═══════════════════════════════════════════════════════════════════════════");
+        System.out.println();
+        SimResult base50k = runSimulation(false, 50_000);
+        SimResult exp50k = runSimulation(true, 50_000);
+        printDetailedComparison(base50k, exp50k);
     }
 
     static void printConfig() {
@@ -57,18 +97,78 @@ public class BackpressureBatchingSim {
         System.out.printf("  max.in.flight        = %d%n", MAX_INFLIGHT);
         System.out.printf("  RTT                  = %d ms%n", RTT_MS);
         System.out.printf("  record size          = %d bytes%n", RECORD_SIZE);
-        System.out.printf("  record arrival rate  = %,d records/sec%n", RECORD_ARRIVAL_RATE);
+        System.out.printf("  linger.ms            = %d ms%n", LINGER_MS);
         System.out.printf("  simulation duration  = %,d ms%n", SIM_DURATION_MS);
-        System.out.printf("  backpressure mult    = %dx (effective batch = %d KB)%n",
+        System.out.printf("  backpressure mult    = %dx (expanded batch = %d KB)%n",
                 BACKPRESSURE_MULTIPLIER, BATCH_SIZE * BACKPRESSURE_MULTIPLIER / 1024);
+        System.out.printf("  baseline pipe cap    = ~%,d rec/s (%.1f MB/s)%n",
+                MAX_INFLIGHT * (BATCH_SIZE / RECORD_SIZE) * (1000 / RTT_MS),
+                (double) MAX_INFLIGHT * BATCH_SIZE / RTT_MS * 1000 / 1_048_576.0);
+        System.out.printf("  expanded pipe cap    = ~%,d rec/s (%.1f MB/s)%n",
+                MAX_INFLIGHT * (BATCH_SIZE * BACKPRESSURE_MULTIPLIER / RECORD_SIZE) * (1000 / RTT_MS),
+                (double) MAX_INFLIGHT * BATCH_SIZE * BACKPRESSURE_MULTIPLIER / RTT_MS * 1000 / 1_048_576.0);
     }
 
-    static SimResult runSimulation(boolean expandedBatching) {
-        // Inflight tracking: priority queue of completion times
+    static void printRateSweep() {
+        System.out.println("╔══════════╦═══════════╦═══════════╦═════════╦══════════╦══════════╦══════════╦══════════╦═════════════╗");
+        System.out.println("║ Arrival  ║ Baseline  ║ Expanded  ║ Thru-   ║ Expanded ║ Avg Fill ║ Wasted   ║ Inflight ║ Avg Record  ║");
+        System.out.println("║ Rate     ║ Thruput   ║ Thruput   ║ put     ║ Batches  ║ Ratio    ║ Memory   ║ Full     ║ Latency     ║");
+        System.out.println("║ (rec/s)  ║ (MB/s)    ║ (MB/s)    ║ Gain    ║ (% total)║ (exp'd)  ║ (KB/req) ║ (% time) ║ Base → Exp  ║");
+        System.out.println("╠══════════╬═══════════╬═══════════╬═════════╬══════════╬══════════╬══════════╬══════════╬═════════════╣");
+
+        for (int rate : ARRIVAL_RATES) {
+            SimResult baseline = runSimulation(false, rate);
+            SimResult expanded = runSimulation(true, rate);
+
+            double baseThroughput = baseline.totalBytesSent / (SIM_DURATION_MS / 1000.0) / 1_048_576.0;
+            double expThroughput = expanded.totalBytesSent / (SIM_DURATION_MS / 1000.0) / 1_048_576.0;
+            double gain = baseThroughput > 0 ? expThroughput / baseThroughput : 0;
+
+            int totalExpandedBatches = expanded.expandedBatches;
+            int totalBatches = expanded.normalBatches + expanded.expandedBatches;
+            double expandedPct = totalBatches > 0 ? 100.0 * totalExpandedBatches / totalBatches : 0;
+
+            double avgFillRatio = expanded.expandedBatchBytesUsed > 0
+                    ? (double) expanded.expandedBatchBytesUsed / expanded.expandedBatchBytesAllocated
+                    : 0;
+
+            double wastedKBPerReq = expanded.totalRequestsSent > 0
+                    ? (double) (expanded.expandedBatchBytesAllocated - expanded.expandedBatchBytesUsed) / expanded.totalRequestsSent / 1024.0
+                    : 0;
+
+            double inflightFullPct = 100.0 * baseline.timeInflightFull / SIM_DURATION_MS;
+
+            double baseAvgLatency = baseline.totalRecordsSent > 0
+                    ? (double) baseline.totalRecordLatencyMs / baseline.totalRecordsSent
+                    : 0;
+            double expAvgLatency = expanded.totalRecordsSent > 0
+                    ? (double) expanded.totalRecordLatencyMs / expanded.totalRecordsSent
+                    : 0;
+
+            System.out.printf("║ %,7d  ║ %7.2f   ║ %7.2f   ║ %5.2fx  ║ %6.1f%%  ║ %6.1f%%  ║ %6.1f   ║ %6.1f%%  ║ %4.0f → %4.0fms ║%n",
+                    rate, baseThroughput, expThroughput, gain,
+                    expandedPct, avgFillRatio * 100, wastedKBPerReq,
+                    inflightFullPct, baseAvgLatency, expAvgLatency);
+        }
+
+        System.out.println("╚══════════╩═══════════╩═══════════╩═════════╩══════════╩══════════╩══════════╩══════════╩═════════════╝");
+
+        System.out.println();
+        System.out.println("Key observations:");
+        System.out.println("  - 'Avg Fill Ratio' = bytes used / bytes allocated for expanded batches.");
+        System.out.println("    When < 100%, expanded batches are sent partially filled (linger.ms or slot opened).");
+        System.out.println("  - 'Wasted Memory' = unused allocated bytes in expanded batches, amortized per request.");
+        System.out.println("    These use the BufferPool's non-poolable path (not returned to the free list).");
+        System.out.println("  - 'Avg Record Latency' = average time from record arrival to batch send.");
+        System.out.println("    Higher at low rates because partial batches wait for linger.ms to expire.");
+        System.out.println("  - At rates below baseline capacity, inflight never fills → no expanded batches created.");
+        System.out.println("  - At rates just above baseline capacity, expanded batches are partially filled");
+        System.out.println("    but still carry more data per request than baseline → net throughput gain.");
+    }
+
+    static SimResult runSimulation(boolean expandedBatching, int arrivalRate) {
         PriorityQueue<Long> inflightCompletions = new PriorityQueue<>();
-        // Accumulator: queue of batches waiting to be sent
         Deque<Batch> pendingBatches = new ArrayDeque<>();
-        // Current batch being filled
         Batch currentBatch = null;
 
         boolean nodeInflightFull = false;
@@ -81,9 +181,15 @@ public class BackpressureBatchingSim {
         long timeInflightFull = 0;
         int maxPendingBatches = 0;
 
-        // Records arrive continuously; we model fractional accumulation
+        // Latency tracking
+        long totalRecordLatencyMs = 0;
+
+        // Expanded batch fill tracking
+        long expandedBatchBytesAllocated = 0;
+        long expandedBatchBytesUsed = 0;
+
         double recordDebt = 0.0;
-        double recordsPerMs = RECORD_ARRIVAL_RATE / 1000.0;
+        double recordsPerMs = arrivalRate / 1000.0;
 
         for (long now = 0; now < SIM_DURATION_MS; now++) {
             // --- 1. Complete any inflight requests whose RTT has elapsed ---
@@ -98,34 +204,28 @@ public class BackpressureBatchingSim {
                     int batchCapacity;
                     if (expandedBatching && nodeInflightFull) {
                         batchCapacity = BATCH_SIZE * BACKPRESSURE_MULTIPLIER;
+                        expandedBatchCount++;
+                        expandedBatchBytesAllocated += batchCapacity;
                     } else {
                         batchCapacity = BATCH_SIZE;
-                    }
-                    currentBatch = new Batch(batchCapacity);
-                    if (batchCapacity > BATCH_SIZE) {
-                        expandedBatchCount++;
-                    } else {
                         normalBatches++;
                     }
+                    currentBatch = new Batch(batchCapacity, now);
                 }
-                if (!currentBatch.tryAppend(RECORD_SIZE)) {
-                    // Batch full — seal it and queue
+                if (!currentBatch.tryAppend(RECORD_SIZE, now)) {
                     pendingBatches.addLast(currentBatch);
                     currentBatch = null;
-                    // Don't consume the record yet; loop will create a new batch
                     continue;
                 }
                 recordDebt -= 1.0;
             }
 
-            // --- 3. Sender loop (runs every SENDER_INTERVAL_MS) ---
+            // --- 3. Sender loop ---
             if (now % SENDER_INTERVAL_MS == 0) {
                 int inflight = inflightCompletions.size();
 
-                // Determine if node is ready (has available inflight slots)
                 boolean clientReady = inflight < MAX_INFLIGHT;
 
-                // Set the backpressure flag (mirrors Sender.sendProducerData logic)
                 if (!clientReady) {
                     nodeInflightFull = true;
                     timeInflightFull++;
@@ -137,19 +237,31 @@ public class BackpressureBatchingSim {
                 while (clientReady && inflight < MAX_INFLIGHT) {
                     Batch toSend = pendingBatches.pollFirst();
                     if (toSend == null) {
-                        // Try sending the current partial batch if it exists
-                        if (currentBatch != null && currentBatch.usedBytes > 0) {
+                        // Try sending current partial batch if linger time has elapsed
+                        if (currentBatch != null && currentBatch.usedBytes > 0
+                                && (now - currentBatch.createdAtMs) >= LINGER_MS) {
                             toSend = currentBatch;
                             currentBatch = null;
                         } else {
-                            break; // Nothing to send
+                            break;
                         }
                     }
+
                     inflightCompletions.add(now + RTT_MS);
                     totalBytesSent += toSend.usedBytes;
                     totalRecordsSent += toSend.recordCount;
                     totalRequestsSent++;
                     inflight++;
+
+                    // Track latency: each record's latency = (send time) - (record arrival time)
+                    for (long arrivalMs : toSend.recordArrivalTimes) {
+                        totalRecordLatencyMs += (now - arrivalMs);
+                    }
+
+                    // Track fill ratio for expanded batches
+                    if (toSend.capacity > BATCH_SIZE) {
+                        expandedBatchBytesUsed += toSend.usedBytes;
+                    }
                 }
 
                 maxPendingBatches = Math.max(maxPendingBatches, pendingBatches.size());
@@ -164,11 +276,14 @@ public class BackpressureBatchingSim {
                 normalBatches,
                 expandedBatchCount,
                 timeInflightFull,
-                maxPendingBatches
+                maxPendingBatches,
+                totalRecordLatencyMs,
+                expandedBatchBytesAllocated,
+                expandedBatchBytesUsed
         );
     }
 
-    static void printComparison(SimResult baseline, SimResult expanded) {
+    static void printDetailedComparison(SimResult baseline, SimResult expanded) {
         System.out.println("┌─────────────────────────────────┬──────────────────┬──────────────────┐");
         System.out.println("│ Metric                          │     Baseline     │     Expanded     │");
         System.out.println("├─────────────────────────────────┼──────────────────┼──────────────────┤");
@@ -205,27 +320,27 @@ public class BackpressureBatchingSim {
         printRow("Max pending batches",
                 String.format("%,d", baseline.maxPendingBatches),
                 String.format("%,d", expanded.maxPendingBatches));
+
+        double baseAvgLatency = baseline.totalRecordsSent > 0
+                ? (double) baseline.totalRecordLatencyMs / baseline.totalRecordsSent : 0;
+        double expAvgLatency = expanded.totalRecordsSent > 0
+                ? (double) expanded.totalRecordLatencyMs / expanded.totalRecordsSent : 0;
+        printRow("Avg record latency (ms)",
+                String.format("%.1f", baseAvgLatency),
+                String.format("%.1f", expAvgLatency));
+
+        double avgFillRatio = expanded.expandedBatchBytesAllocated > 0
+                ? 100.0 * expanded.expandedBatchBytesUsed / expanded.expandedBatchBytesAllocated : 0;
+        printRow("Expanded batch fill ratio",
+                "n/a",
+                String.format("%.1f%%", avgFillRatio));
+
+        long wastedBytes = expanded.expandedBatchBytesAllocated - expanded.expandedBatchBytesUsed;
+        printRow("Wasted expanded alloc",
+                "n/a",
+                String.format("%,d KB", wastedBytes / 1024));
+
         System.out.println("└─────────────────────────────────┴──────────────────┴──────────────────┘");
-
-        System.out.println();
-        double byteImprovement = (double) expanded.totalBytesSent / baseline.totalBytesSent;
-        double requestReduction = 1.0 - (double) expanded.totalRequestsSent / baseline.totalRequestsSent;
-        double pendingReduction = 1.0 - (double) expanded.maxPendingBatches / baseline.maxPendingBatches;
-
-        System.out.println("Impact Summary:");
-        System.out.printf("  Throughput improvement:    %.1fx%n", byteImprovement);
-        System.out.printf("  Request count reduction:   %.1f%%%n", requestReduction * 100);
-        System.out.printf("  Peak pending reduction:    %.1f%%%n", pendingReduction * 100);
-        System.out.println();
-        System.out.println("Analysis:");
-        System.out.println("  With max.in.flight=5 and RTT=100ms, the pipeline can sustain at most");
-        System.out.printf("  5 requests per 100ms. At batch.size=16KB, that caps throughput at ~%.1f MB/s.%n",
-                (double) MAX_INFLIGHT * BATCH_SIZE / RTT_MS * 1000 / 1_048_576.0);
-        System.out.printf("  With 4x expanded batches under backpressure, the cap rises to ~%.1f MB/s.%n",
-                (double) MAX_INFLIGHT * BATCH_SIZE * BACKPRESSURE_MULTIPLIER / RTT_MS * 1000 / 1_048_576.0);
-        System.out.println("  The larger batches fill each inflight slot with more data, directly");
-        System.out.println("  increasing the bandwidth-delay product the producer can sustain.");
-        System.out.println("  Fewer, larger requests also reduce per-request overhead (headers, acks).");
     }
 
     static void printRow(String label, String baseVal, String expVal) {
@@ -234,19 +349,23 @@ public class BackpressureBatchingSim {
 
     static class Batch {
         final int capacity;
+        final long createdAtMs;
         int usedBytes;
         int recordCount;
+        final List<Long> recordArrivalTimes = new ArrayList<>();
 
-        Batch(int capacity) {
+        Batch(int capacity, long createdAtMs) {
             this.capacity = capacity;
+            this.createdAtMs = createdAtMs;
         }
 
-        boolean tryAppend(int recordSize) {
+        boolean tryAppend(int recordSize, long arrivalMs) {
             if (usedBytes + recordSize > capacity) {
                 return false;
             }
             usedBytes += recordSize;
             recordCount++;
+            recordArrivalTimes.add(arrivalMs);
             return true;
         }
     }
@@ -260,10 +379,15 @@ public class BackpressureBatchingSim {
         final int expandedBatches;
         final long timeInflightFull;
         final int maxPendingBatches;
+        final long totalRecordLatencyMs;
+        final long expandedBatchBytesAllocated;
+        final long expandedBatchBytesUsed;
 
         SimResult(boolean expandedBatching, long totalBytesSent, long totalRecordsSent,
                   int totalRequestsSent, int normalBatches, int expandedBatches,
-                  long timeInflightFull, int maxPendingBatches) {
+                  long timeInflightFull, int maxPendingBatches,
+                  long totalRecordLatencyMs,
+                  long expandedBatchBytesAllocated, long expandedBatchBytesUsed) {
             this.expandedBatching = expandedBatching;
             this.totalBytesSent = totalBytesSent;
             this.totalRecordsSent = totalRecordsSent;
@@ -272,6 +396,9 @@ public class BackpressureBatchingSim {
             this.expandedBatches = expandedBatches;
             this.timeInflightFull = timeInflightFull;
             this.maxPendingBatches = maxPendingBatches;
+            this.totalRecordLatencyMs = totalRecordLatencyMs;
+            this.expandedBatchBytesAllocated = expandedBatchBytesAllocated;
+            this.expandedBatchBytesUsed = expandedBatchBytesUsed;
         }
     }
 }
