@@ -1,0 +1,46 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements. See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License. You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.apache.kafka.network.netty;
+
+import java.net.InetSocketAddress;
+import java.util.concurrent.CompletableFuture;
+
+/**
+ * Asynchronous client transport SPI for the Kafka wire protocol.
+ *
+ * <p>The returned connection future completes only after the connection is fully usable:
+ * TCP connected, TLS handshake finished (when configured) and ApiVersions negotiation done —
+ * the equivalent of the classic {@code NetworkClient}'s {@code ready()} state.
+ *
+ * <p>Implementations: {@link NettyClientTransport} (production); a deterministic in-memory
+ * simulation transport is planned (DESIGN.md, D13).
+ */
+public interface ClientTransport extends AutoCloseable {
+
+    /**
+     * Open a connection and negotiate it to readiness.
+     *
+     * @param connectionId transport-scoped identifier used in logs and metrics (for brokers,
+     *                     conventionally the node id)
+     * @param address      the broker address
+     * @param spec         connection settings
+     */
+    CompletableFuture<KafkaConnection> connect(String connectionId, InetSocketAddress address, ConnectionSpec spec);
+
+    @Override
+    void close();
+}

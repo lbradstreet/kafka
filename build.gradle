@@ -361,11 +361,17 @@ subprojects {
   tasks.withType(AbstractArchiveTask).configureEach {
     reproducibleFileOrder = false
     preserveFileTimestamps = true
-    useFileSystemPermissions()
+    // Gradle 9 API; skip on older Gradle (some dev environments cannot download 9.x)
+    if (it.respondsTo('useFileSystemPermissions')) {
+      useFileSystemPermissions()
+    }
   }
 
   tasks.withType(AbstractTestTask).configureEach {
-    failOnNoDiscoveredTests = false
+    // Gradle 9 API; skip on older Gradle
+    if (it.hasProperty('failOnNoDiscoveredTests')) {
+      failOnNoDiscoveredTests = false
+    }
   }
 
   // apply the eclipse plugin only to subprojects that hold code. 'connect' is just a folder.
@@ -2382,6 +2388,65 @@ project(':server-common') {
 
   checkstyle {
     configProperties = checkstyleConfigProperties("import-control-server-common.xml")
+  }
+
+  javadoc {
+    enabled = false
+  }
+}
+
+project(':transport-netty') {
+  base {
+    archivesName = "kafka-transport-netty"
+  }
+
+  dependencies {
+    api project(':clients')
+    api libs.nettyBuffer
+    api libs.nettyTransport
+    implementation libs.nettyCodec
+    implementation libs.nettyHandler
+    implementation libs.slf4jApi
+
+    runtimeOnly libs.nettyTransportNativeEpoll
+
+    testImplementation testFixtures(project(':clients'))
+    testImplementation libs.junitJupiter
+    testImplementation libs.mockitoCore
+    testImplementation testLog4j2Libs
+
+    testRuntimeOnly runtimeTestLibs
+  }
+
+  checkstyle {
+    configProperties = checkstyleConfigProperties("import-control-transport-netty.xml")
+  }
+
+  javadoc {
+    enabled = false
+  }
+}
+
+project(':clients-v2') {
+  base {
+    archivesName = "kafka-clients-v2"
+  }
+
+  dependencies {
+    api project(':clients')
+    api project(':transport-netty')
+    implementation libs.slf4jApi
+
+    testImplementation testFixtures(project(':clients'))
+    testImplementation libs.junitJupiter
+    testImplementation libs.mockitoCore
+    testImplementation testLog4j2Libs
+
+    testRuntimeOnly runtimeTestLibs
+  }
+
+  checkstyle {
+    configProperties = checkstyleConfigProperties("import-control-clients-v2.xml")
   }
 
   javadoc {
