@@ -36,11 +36,30 @@ keyed/late-bound assignments, consumed back and compared exactly):
   `MetadataManager`; producer with `RecordAccumulatorV2` (one batch per partition per
   request), late binding (D14), no-op `BatchSealer` (D15), `MemoryLimiter` (D9, fail-fast
   variant); assignment-based consumer (fetch v12, sessionless); minimal admin.
+- **DST harness (Phase 2b, D13)** — landed. The sim runtime ships as `:transport-netty`
+  test fixtures (same package as the transport so the *real* `NettyKafkaConnection` +
+  frame decoder run unmodified over `EmbeddedChannel`s): `SimScheduler` (virtual-time
+  single task queue driving `MockTime`), `SimTransport`/`SimNetwork` (order-preserving
+  per-connection delivery; seeded `FaultInjector` for drops, delays, disconnects),
+  protocol-accurate `SimBroker` (ApiVersions/Metadata/Produce with real `MemoryRecords`
+  CRC validation; deterministic topic ids; controllable leadership moves) and a
+  `SimTrace`. `DstHarness` (clients-v2 tests) wires it through the existing
+  `KafkaClientRuntime` builder seams. Determinism required two production changes:
+  `SenderV2` became a self-rescheduling async tick on the runtime scheduler (no drain
+  thread, no blocking metadata waits; `closeAsync()` added), and request timeouts gained
+  a scheduler seam in `ConnectionSpec`. Tests: 20-seed quiet-network exactly-once sweep,
+  same-seed trace-equality under faults, 20-seed faulty-network liveness +
+  no-invented-acks sweep, and a D14 rebind-under-total-leader-failover scenario — all in
+  seconds of wall clock.
+
+**Scope note:** this effort is producer-focused. Consumer groups, fetch sessions and other
+consumer-side depth are **deferred indefinitely** — the assign-based consumer exists only
+as verification tooling (and the DST harness verifies against the SimBroker log directly,
+needing no consumer at all).
 
 Not yet implemented (per phase plan below): SASL handshake handler, `Selectable` adapter +
-broker flag, simulation runtime/DST harness, pooled receive payloads (responses are copied
-to heap before parse — classic-client parity), chunked compression sink, group membership,
-fetch sessions, acks=0 fire-and-forget, metrics.
+broker flag, pooled receive payloads (responses are copied to heap before parse —
+classic-client parity), chunked compression sink, acks=0 fire-and-forget, metrics.
 
 ## 1. Goals
 

@@ -19,6 +19,7 @@ package org.apache.kafka.network.netty;
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ScheduledExecutorService;
 
 /**
  * Per-connection settings for {@link ClientTransport#connect}.
@@ -36,6 +37,9 @@ import java.util.concurrent.Executor;
  * @param receiveBufferBytes socket receive buffer, or {@link #USE_DEFAULT_BUFFER_SIZE}
  * @param callbackExecutor  executor on which user-visible futures complete; never the event loop
  *                          (design decision D10)
+ * @param timeoutScheduler  scheduler for request timeouts, or null to use the channel's event
+ *                          loop. The deterministic simulation harness injects its virtual-time
+ *                          scheduler here so every timed event lives in one queue (D13).
  */
 public record ConnectionSpec(
     String clientId,
@@ -46,7 +50,8 @@ public record ConnectionSpec(
     int maxReceiveBytes,
     int sendBufferBytes,
     int receiveBufferBytes,
-    Executor callbackExecutor
+    Executor callbackExecutor,
+    ScheduledExecutorService timeoutScheduler
 ) {
 
     public static final int USE_DEFAULT_BUFFER_SIZE = -1;
@@ -67,6 +72,12 @@ public record ConnectionSpec(
         return new Builder(clientId);
     }
 
+    /** @return a copy of this spec with the given timeout scheduler (used by the sim harness). */
+    public ConnectionSpec withTimeoutScheduler(ScheduledExecutorService scheduler) {
+        return new ConnectionSpec(clientId, security, requestTimeout, connectTimeout, maxInFlight,
+            maxReceiveBytes, sendBufferBytes, receiveBufferBytes, callbackExecutor, scheduler);
+    }
+
     public static final class Builder {
         private final String clientId;
         private SecuritySpec security = SecuritySpec.PLAINTEXT;
@@ -77,6 +88,7 @@ public record ConnectionSpec(
         private int sendBufferBytes = USE_DEFAULT_BUFFER_SIZE;
         private int receiveBufferBytes = USE_DEFAULT_BUFFER_SIZE;
         private Executor callbackExecutor = Runnable::run;
+        private ScheduledExecutorService timeoutScheduler = null;
 
         private Builder(String clientId) {
             this.clientId = clientId;
@@ -122,9 +134,15 @@ public record ConnectionSpec(
             return this;
         }
 
+        public Builder timeoutScheduler(ScheduledExecutorService scheduler) {
+            this.timeoutScheduler = scheduler;
+            return this;
+        }
+
         public ConnectionSpec build() {
             return new ConnectionSpec(clientId, security, requestTimeout, connectTimeout,
-                maxInFlight, maxReceiveBytes, sendBufferBytes, receiveBufferBytes, callbackExecutor);
+                maxInFlight, maxReceiveBytes, sendBufferBytes, receiveBufferBytes, callbackExecutor,
+                timeoutScheduler);
         }
     }
 }

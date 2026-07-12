@@ -166,10 +166,12 @@ final class NettyKafkaConnection implements KafkaConnection {
             entry.future.completeExceptionally(new DisconnectException("Connection to " + id + " is closed"));
             return;
         }
-        entry.timeoutTask = channel.eventLoop().schedule(
-            () -> onRequestTimeout(entry),
-            spec.requestTimeout().toMillis(),
-            TimeUnit.MILLISECONDS);
+        // The timeout callback always runs on the event loop; the scheduler seam lets the
+        // deterministic simulation harness own all timed events (D13).
+        Runnable onTimeout = () -> runOnEventLoop(() -> onRequestTimeout(entry));
+        entry.timeoutTask = spec.timeoutScheduler() != null
+            ? spec.timeoutScheduler().schedule(onTimeout, spec.requestTimeout().toMillis(), TimeUnit.MILLISECONDS)
+            : channel.eventLoop().schedule(onTimeout, spec.requestTimeout().toMillis(), TimeUnit.MILLISECONDS);
         // Negotiation must precede any user request that may already be queued.
         if (entry.negotiation)
             pending.addFirst(entry);

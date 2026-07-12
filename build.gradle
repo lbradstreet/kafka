@@ -2400,6 +2400,8 @@ project(':transport-netty') {
     archivesName = "kafka-transport-netty"
   }
 
+  apply plugin: 'java-test-fixtures'
+
   dependencies {
     api project(':clients')
     api libs.nettyBuffer
@@ -2409,6 +2411,13 @@ project(':transport-netty') {
     implementation libs.slf4jApi
 
     runtimeOnly libs.nettyTransportNativeEpoll
+
+    // The deterministic simulation runtime (org.apache.kafka.network.netty.sim) ships as
+    // test fixtures so client modules can run DST scenarios against the real pipeline code.
+    testFixturesApi project(':clients')
+    testFixturesApi testFixtures(project(':clients'))
+    testFixturesImplementation libs.nettyCodec
+    testFixturesImplementation libs.slf4jApi
 
     testImplementation testFixtures(project(':clients'))
     testImplementation libs.junitJupiter
@@ -2438,6 +2447,7 @@ project(':clients-v2') {
     implementation libs.slf4jApi
 
     testImplementation testFixtures(project(':clients'))
+    testImplementation testFixtures(project(':transport-netty'))
     testImplementation libs.junitJupiter
     testImplementation libs.mockitoCore
     testImplementation testLog4j2Libs

@@ -36,22 +36,29 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
 
 /**
- * The drain thread: binds and seals ready batches (D14/D15 seams live in the accumulator),
+ * The drain pump: binds and seals ready batches (D14/D15 seams live in the accumulator),
  * groups them by partition leader, and sends produce requests through the dispatcher.
  *
- * <p>Retriable per-partition errors re-enqueue the sealed batch (it keeps its partition) after
- * the retry backoff, alongside a metadata refresh — mirroring classic Sender behavior minus
- * idempotence bookkeeping.
+ * <p>Runs as a self-rescheduling asynchronous tick on the runtime scheduler — no dedicated
+ * thread, no blocking waits. Every source of time and scheduling flows through
+ * {@link KafkaClientRuntime}, so the whole pump is deterministic under the simulation
+ * harness (D13).
+ *
+ * <p>Retriable per-partition errors re-enqueue the sealed batch (it keeps its partition)
+ * after the retry backoff, alongside a metadata refresh — mirroring classic Sender behavior
+ * minus idempotence bookkeeping (D15).
  */
-final class SenderV2 implements Runnable {
+final class SenderV2 {
 
     private static final Logger log = LoggerFactory.getLogger(SenderV2.class);
-    private static final long IDLE_SLEEP_MS = 5;
+    private static final long IDLE_TICK_MS = 5;
+    private static final long ACTIVE_TICK_MS = 1;
 
     private final KafkaClientRuntime runtime;
     private final ProducerSettings settings;
@@ -59,8 +66,9 @@ final class SenderV2 implements Runnable {
     private final MetadataManager metadata;
     private final RecordAccumulatorV2 accumulator;
 
-    private volatile boolean running = true;
-    private final CountDownLatch shutdownLatch = new CountDownLatch(1);
+    private volatile boolean closing = false;
+    private volatile long closeDeadlineMs = Long.MAX_VALUE;
+    private final CompletableFuture<Void> closedFuture = new CompletableFuture<>();
 
     SenderV2(KafkaClientRuntime runtime, ProducerSettings settings,
              NetworkRequestDispatcher dispatcher, MetadataManager metadata,
@@ -72,53 +80,80 @@ final class SenderV2 implements Runnable {
         this.accumulator = accumulator;
     }
 
-    @Override
-    public void run() {
-        log.debug("v2 producer sender started");
-        while (running)
-            runOnce();
-        // Orderly close: keep draining what was accepted before close, bounded in time.
-        long deadline = runtime.time().milliseconds() + 2 * settings.client().requestTimeout().toMillis();
-        while (!accumulator.isEmpty() && runtime.time().milliseconds() < deadline)
-            runOnce();
-        shutdownLatch.countDown();
-        log.debug("v2 producer sender stopped");
+    void start() {
+        scheduleTick(0);
     }
 
-    void initiateClose() {
-        accumulator.requestFlush();
-        running = false;
+    /**
+     * Begin an orderly close: everything accepted so far is flushed (bounded by twice the
+     * request timeout), then the tick chain stops and the returned future completes.
+     */
+    CompletableFuture<Void> closeAsync() {
+        if (!closing) {
+            closing = true;
+            closeDeadlineMs = runtime.time().milliseconds()
+                + 2 * settings.client().requestTimeout().toMillis();
+            accumulator.requestFlush();
+        }
+        return closedFuture;
     }
 
-    boolean awaitShutdown(long timeoutMs) throws InterruptedException {
-        return shutdownLatch.await(timeoutMs, TimeUnit.MILLISECONDS);
-    }
+    // ---------------------------------------------------------------- tick chain
 
-    private void runOnce() {
+    private void scheduleTick(long delayMs) {
         try {
-            accumulator.clearFlushIfDrained();
-            Set<String> topics = accumulator.topics();
-            if (topics.isEmpty() || accumulator.isEmpty()) {
-                sleepQuietly(IDLE_SLEEP_MS);
-                return;
-            }
-            Cluster cluster = metadata.cluster(topics)
-                .get(settings.client().requestTimeout().toMillis(), TimeUnit.MILLISECONDS);
-            Map<Node, List<BatchV2>> drained = accumulator.drain(cluster, runtime.time().milliseconds());
-            if (drained.isEmpty()) {
-                sleepQuietly(Math.min(IDLE_SLEEP_MS, Math.max(1, settings.linger().toMillis())));
-                return;
-            }
-            for (Map.Entry<Node, List<BatchV2>> entry : drained.entrySet())
-                sendProduceRequest(entry.getKey(), entry.getValue(), cluster);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            running = false;
-        } catch (Exception e) {
-            log.warn("v2 producer drain iteration failed; backing off", e);
-            sleepQuietly(settings.client().retryBackoff().toMillis());
+            runtime.scheduler().schedule(this::tick, delayMs, TimeUnit.MILLISECONDS);
+        } catch (RejectedExecutionException e) {
+            // Runtime shut down under us; end the chain.
+            closedFuture.complete(null);
         }
     }
+
+    /** Exactly one next tick is scheduled on every path out of this method. */
+    private void tick() {
+        try {
+            accumulator.clearFlushIfDrained();
+            if (closing && (accumulator.isEmpty()
+                || runtime.time().milliseconds() >= closeDeadlineMs)) {
+                if (!accumulator.isEmpty())
+                    log.warn("v2 producer close deadline reached with unsent batches");
+                closedFuture.complete(null);
+                return;
+            }
+            Set<String> topics = accumulator.topics();
+            if (topics.isEmpty() || accumulator.isEmpty()) {
+                scheduleTick(IDLE_TICK_MS);
+                return;
+            }
+            metadata.cluster(topics).whenComplete((cluster, error) -> {
+                try {
+                    if (error != null) {
+                        log.debug("Metadata unavailable for drain; backing off", error);
+                        scheduleTick(settings.client().retryBackoff().toMillis());
+                        return;
+                    }
+                    Map<Node, List<BatchV2>> drained =
+                        accumulator.drain(cluster, runtime.time().milliseconds());
+                    for (Map.Entry<Node, List<BatchV2>> entry : drained.entrySet())
+                        sendProduceRequest(entry.getKey(), entry.getValue(), cluster);
+                    scheduleTick(drained.isEmpty() ? idleDelayMs() : ACTIVE_TICK_MS);
+                } catch (Throwable t) {
+                    log.warn("v2 producer drain failed; backing off", t);
+                    scheduleTick(settings.client().retryBackoff().toMillis());
+                }
+            });
+        } catch (Throwable t) {
+            log.warn("v2 producer tick failed; backing off", t);
+            scheduleTick(settings.client().retryBackoff().toMillis());
+        }
+    }
+
+    private long idleDelayMs() {
+        long linger = settings.linger().toMillis();
+        return linger > 0 ? Math.min(linger, IDLE_TICK_MS) : IDLE_TICK_MS;
+    }
+
+    // ---------------------------------------------------------------- produce dispatch
 
     private void sendProduceRequest(Node node, List<BatchV2> batches, Cluster cluster) {
         // A batch polled out of the accumulator is owned by this method: every exit path —
@@ -213,18 +248,14 @@ final class SenderV2 implements Runnable {
             log.debug("Retrying batch for {} (attempt {}) after {}", batch.partition(),
                 batch.attempts(), cause.toString());
             metadata.refresh();
-            runtime.scheduler().schedule(() -> accumulator.reenqueue(batch),
-                settings.client().retryBackoff().toMillis(), TimeUnit.MILLISECONDS);
+            try {
+                runtime.scheduler().schedule(() -> accumulator.reenqueue(batch),
+                    settings.client().retryBackoff().toMillis(), TimeUnit.MILLISECONDS);
+            } catch (RejectedExecutionException e) {
+                batch.completeExceptionally(cause);
+            }
         } else {
             batch.completeExceptionally(cause);
-        }
-    }
-
-    private static void sleepQuietly(long ms) {
-        try {
-            Thread.sleep(ms);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
         }
     }
 }

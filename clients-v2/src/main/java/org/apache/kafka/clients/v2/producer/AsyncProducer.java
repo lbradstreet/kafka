@@ -50,7 +50,14 @@ public interface AsyncProducer<K, V> extends AutoCloseable {
             "Transactions are not implemented in the v2 producer yet (see DESIGN.md, D15)");
     }
 
-    /** Flush, then release all resources. */
+    /**
+     * Begin an orderly close without blocking: buffered records are flushed (bounded in
+     * time), then resources are released. The deterministic simulation harness uses this
+     * form; {@link #close()} is the blocking equivalent.
+     */
+    CompletableFuture<Void> closeAsync();
+
+    /** Flush, then release all resources, blocking until done. */
     @Override
     void close();
 

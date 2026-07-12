@@ -53,7 +53,6 @@ public final class DefaultAsyncProducer<K, V> implements AsyncProducer<K, V> {
     private final MetadataManager metadata;
     private final RecordAccumulatorV2 accumulator;
     private final SenderV2 sender;
-    private final Thread senderThread;
 
     private volatile boolean closed = false;
 
@@ -75,9 +74,7 @@ public final class DefaultAsyncProducer<K, V> implements AsyncProducer<K, V> {
         this.accumulator = new RecordAccumulatorV2(settings,
             new MemoryLimiter(settings.bufferMemory()), BatchSealer.NO_OP);
         this.sender = new SenderV2(runtime, settings, dispatcher, metadata, accumulator);
-        this.senderThread = new Thread(sender, "kafka-v2-producer-" + settings.client().clientId());
-        this.senderThread.setDaemon(true);
-        this.senderThread.start();
+        this.sender.start();
     }
 
     @Override
@@ -132,18 +129,21 @@ public final class DefaultAsyncProducer<K, V> implements AsyncProducer<K, V> {
     }
 
     @Override
-    public void close() {
-        if (closed)
-            return;
+    public CompletableFuture<Void> closeAsync() {
         closed = true;
-        sender.initiateClose();
+        return sender.closeAsync().whenComplete((v, e) -> dispatcher.close());
+    }
+
+    @Override
+    public void close() {
         try {
-            if (!sender.awaitShutdown(2 * settings.client().requestTimeout().toMillis() + 5_000))
-                log.warn("v2 producer sender did not stop within the close timeout");
+            closeAsync().get(2 * settings.client().requestTimeout().toMillis() + 5_000,
+                java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+        } catch (Exception e) {
+            log.warn("v2 producer close did not finish cleanly", e);
         }
-        dispatcher.close();
     }
 
     private static Header[] headersOf(List<Header> headers) {
