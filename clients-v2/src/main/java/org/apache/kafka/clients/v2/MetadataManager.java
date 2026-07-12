@@ -72,6 +72,12 @@ public final class MetadataManager {
         return refresh();
     }
 
+    /** @return the last fetched cluster view without triggering I/O, or null if none yet */
+    public Cluster cachedCluster() {
+        Cached snapshot = cached;
+        return snapshot == null ? null : snapshot.cluster();
+    }
+
     /** Force a metadata refresh for every topic seen so far. */
     public CompletableFuture<Cluster> refresh() {
         long deadlineMs = runtime.time().milliseconds() + settings.requestTimeout().toMillis();

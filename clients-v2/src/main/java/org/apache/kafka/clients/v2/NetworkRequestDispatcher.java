@@ -92,6 +92,17 @@ public final class NetworkRequestDispatcher implements AutoCloseable {
             .thenCompose(connection -> connection.send(request));
     }
 
+    /**
+     * @return true if the node's connection exists and its in-flight window is full — further
+     *         requests would only queue locally. Advisory: races only shift batching behavior.
+     */
+    public boolean isSaturated(Node node) {
+        CompletableFuture<KafkaConnection> future = connections.get(node.idString());
+        KafkaConnection connection = future == null ? null : future.getNow(null);
+        return connection != null && connection.isOpen()
+            && connection.inFlightCount() >= settings.maxInFlight();
+    }
+
     private CompletableFuture<KafkaConnection> connectionTo(String id, InetSocketAddress address) {
         return connections.computeIfAbsent(id, connectionId -> {
             log.debug("Opening connection {} to {}", connectionId, address);

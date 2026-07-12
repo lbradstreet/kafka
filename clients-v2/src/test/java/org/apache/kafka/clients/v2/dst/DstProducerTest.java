@@ -153,6 +153,71 @@ public class DstProducerTest {
                 assertEquals(1, count, "duplicates require injected faults: " + value));
     }
 
+    /**
+     * Adaptive batch sealing: with the in-flight window saturated (maxInFlight=1, staggered
+     * sends racing a slow round trip), batches keep growing past batch.size up to
+     * backpressure.batch.size — fewer, larger produce requests than with the feature off.
+     */
+    @Test
+    public void testBackpressureSealingBatchesMoreWhileWindowIsSaturated() {
+        BatchingStats disabled = runStaggered(4242, 512, 512);        // backpressure = batch.size
+        BatchingStats enabled = runStaggered(4242, 512, 8 * 512);     // 8x headroom
+
+        assertEquals(disabled.recordsStored(), enabled.recordsStored(), "both must deliver everything");
+        assertTrue(enabled.maxRecordsPerRequest() > disabled.maxRecordsPerRequest(),
+            "saturation should grow batches past batch.size: enabled max="
+                + enabled.maxRecordsPerRequest() + " vs disabled max=" + disabled.maxRecordsPerRequest());
+        assertTrue(enabled.produceRequests() < disabled.produceRequests(),
+            "larger batches must mean fewer requests: enabled=" + enabled.produceRequests()
+                + " vs disabled=" + disabled.produceRequests());
+    }
+
+    private record BatchingStats(int produceRequests, int maxRecordsPerRequest, int recordsStored) { }
+
+    private BatchingStats runStaggered(long seed, int batchSize, int backpressureBatchSize) {
+        try (DstHarness harness = new DstHarness(seed, FaultProfile.NONE, 1)) {
+            harness.cluster.createTopic(TOPIC, 1); // one partition, one saturated pipe
+            ProducerSettings settings = ProducerSettings
+                .newBuilder(harness.clientSettings().maxInFlight(1).build())
+                .batchSize(batchSize)
+                .backpressureBatchSize(backpressureBatchSize)
+                .maxRequestSize(1024 * 1024)
+                .linger(Duration.ofMillis(1))
+                .build();
+            AsyncProducer<String, String> producer = new DefaultAsyncProducer<>(
+                harness.runtime, settings, new StringSerializer(), new StringSerializer());
+
+            int records = 600;
+            List<CompletableFuture<RecordMetadataV2>> futures = new ArrayList<>();
+            for (int i = 0; i < records; i++) {
+                String value = "value-" + i;
+                // Six records per virtual millisecond: production outruns the single-request
+                // window (RTT ≈ 4ms), so a genuine backlog forms while the window is closed.
+                harness.scheduler.schedule(() -> {
+                    futures.add(producer.send(ProducerRecordV2.of(TOPIC, value)));
+                }, i / 6, TimeUnit.MILLISECONDS);
+            }
+            harness.runUntil(() -> futures.size() == records
+                && futures.stream().allMatch(CompletableFuture::isDone));
+            CompletableFuture<Void> closed = producer.closeAsync();
+            harness.runUntil(closed::isDone);
+
+            futures.forEach(f -> assertTrue(!f.isCompletedExceptionally(), "no failures expected"));
+            int produceRequests = 0;
+            int maxCount = 0;
+            for (String event : harness.traceEvents()) {
+                int idx = event.indexOf(" count=");
+                if (event.contains(" produce " + TOPIC) && idx >= 0) {
+                    produceRequests++;
+                    maxCount = Math.max(maxCount, Integer.parseInt(event.substring(idx + 7)));
+                }
+            }
+            int stored = harness.cluster.log(new TopicPartition(TOPIC, 0)).size();
+            assertEquals(records, stored, "exactly-once delivery expected without faults");
+            return new BatchingStats(produceRequests, maxCount, stored);
+        }
+    }
+
     @Test
     public void testDeferredRecordsRebindAcrossLeaderFailover() {
         try (DstHarness harness = new DstHarness(99, FaultProfile.NONE, 2)) {

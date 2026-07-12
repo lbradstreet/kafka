@@ -49,12 +49,19 @@ public class RecordAccumulatorV2Test {
     }
 
     private static RecordAccumulatorV2 accumulator(int batchSize, Duration linger) {
+        return accumulator(batchSize, linger, BackpressureSignal.NEVER);
+    }
+
+    private static RecordAccumulatorV2 accumulator(int batchSize, Duration linger,
+                                                   BackpressureSignal backpressure) {
         ClientSettings client = ClientSettings.newBuilder("localhost:9092").build();
         ProducerSettings settings = ProducerSettings.newBuilder(client)
             .batchSize(batchSize)
+            .backpressureBatchSize(batchSize * 4)
             .linger(linger)
             .build();
-        return new RecordAccumulatorV2(settings, new MemoryLimiter(1 << 20), BatchSealer.NO_OP);
+        return new RecordAccumulatorV2(settings, new MemoryLimiter(1 << 20), BatchSealer.NO_OP,
+            backpressure);
     }
 
     @Test
@@ -102,6 +109,69 @@ public class RecordAccumulatorV2Test {
             for (BatchV2 batch : drained.get(NODE))
                 used.add(batch.partition());
         assertTrue(used.size() > 1, "late binding should use multiple partitions, used " + used);
+    }
+
+    /** Saturation signal switchable mid-test. */
+    private static final class SwitchableSignal implements BackpressureSignal {
+        volatile boolean saturated = false;
+
+        @Override
+        public boolean isSaturated(TopicPartition partition) {
+            return saturated;
+        }
+
+        @Override
+        public boolean isTopicSaturated(String topic) {
+            return saturated;
+        }
+    }
+
+    @Test
+    public void testSaturationGrowsBatchesPastBatchSizeAndDefersDrain() {
+        SwitchableSignal signal = new SwitchableSignal();
+        int batchSize = 256;
+        RecordAccumulatorV2 accumulator = accumulator(batchSize, Duration.ZERO, signal);
+        PartitionAssignment fixed = new PartitionAssignment.Fixed(0);
+
+        // Saturated: the open batch must keep absorbing records past batch.size (up to the
+        // 4x backpressure limit) and the drain must skip the partition entirely.
+        signal.saturated = true;
+        for (int i = 0; i < 12; i++) // 12 * 64B values ≈ 3x batch.size uncompressed
+            accumulator.append(TOPIC, fixed, 0L, null, VALUE, NO_HEADERS, 0L);
+        assertTrue(accumulator.drain(cluster(1), 1L).isEmpty(),
+            "saturated leaders must not be drained (no premature sealing)");
+
+        // Window opens: everything drains, and the batches are larger than batch.size —
+        // fewer, bigger requests than non-backpressured accumulation would produce.
+        signal.saturated = false;
+        int batches = 0;
+        int maxBatchBytes = 0;
+        Map<Node, List<BatchV2>> drained;
+        while (!(drained = accumulator.drain(cluster(1), 1L)).isEmpty()) {
+            for (BatchV2 batch : drained.get(NODE)) {
+                batches++;
+                maxBatchBytes = Math.max(maxBatchBytes, batch.records().sizeInBytes());
+            }
+        }
+        assertTrue(maxBatchBytes > batchSize,
+            "backpressured batch should exceed batch.size, was " + maxBatchBytes);
+        assertTrue(batches < 12 * 70 / batchSize,
+            "expected fewer, larger batches under backpressure; got " + batches);
+    }
+
+    @Test
+    public void testWithoutSaturationBatchesSealNearBatchSize() {
+        int batchSize = 256;
+        RecordAccumulatorV2 accumulator = accumulator(batchSize, Duration.ZERO);
+        PartitionAssignment fixed = new PartitionAssignment.Fixed(0);
+        for (int i = 0; i < 12; i++)
+            accumulator.append(TOPIC, fixed, 0L, null, VALUE, NO_HEADERS, 0L);
+        Map<Node, List<BatchV2>> drained;
+        while (!(drained = accumulator.drain(cluster(1), 1L)).isEmpty()) {
+            for (BatchV2 batch : drained.get(NODE))
+                assertTrue(batch.records().sizeInBytes() <= batchSize + 2 * VALUE.length + 128,
+                    "unsaturated batches stay near batch.size, was " + batch.records().sizeInBytes());
+        }
     }
 
     @Test

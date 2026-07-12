@@ -158,6 +158,20 @@ them: `MemoryLimiter` (fair FIFO waiters; preserves `buffer.memory`/`max.block.m
 semantics, async-first acquisition) for budget; `PooledByteBufAllocator` for reuse —
 which, unlike `BufferPool`, also pools non-batch.size allocations.
 
+### D9b — Backpressure-adaptive batch sealing
+Batches have two size limits: `batch.size` (the soft target) and
+`backpressure.batch.size` (the hard ceiling, default `min(4 × batch.size,
+max.request.size)`). While the destination leader's in-flight window has room, batches
+seal at `batch.size` as usual. While the window is **saturated** — the request could not
+be sent anyway — the open batch keeps accepting records up to `backpressure.batch.size`,
+and the drain skips the partition rather than sealing prematurely; when the window opens,
+one larger request goes out instead of a queue of small ones. The saturation signal
+(`BackpressureSignal`) is advisory and race-tolerant: it reads only the cached cluster
+view and the connection's in-flight count, never blocking or doing I/O on the send path.
+Unbound (D14) batches use the topic-level signal: they keep growing only while *every*
+available leader is saturated, since drain-time binding could otherwise route them to a
+leader with room.
+
 ### D10 — Threading
 One shared `EventLoopGroup` (epoll where available) per `KafkaClientRuntime`, shareable
 across producer/consumer/admin. User futures/callbacks **never complete on event-loop

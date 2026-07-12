@@ -54,17 +54,29 @@ public final class BatchV2 {
     private final java.util.concurrent.atomic.AtomicInteger attempts =
         new java.util.concurrent.atomic.AtomicInteger();
 
-    BatchV2(TopicPartition partition, int initialCapacity, Compression compression, long nowMs,
-            int memoryCharged) {
+    /**
+     * @param initialCapacity  buffer pre-allocation, normally {@code batch.size}
+     * @param hardLimitBytes   absolute write limit, normally {@code backpressure.batch.size};
+     *                         appends beyond it are refused regardless of backpressure state
+     */
+    BatchV2(TopicPartition partition, int initialCapacity, int hardLimitBytes,
+            Compression compression, long nowMs, int memoryCharged) {
         this.partition = partition;
         this.createdMs = nowMs;
         this.memoryCharged = memoryCharged;
         this.builder = MemoryRecords.builder(ByteBuffer.allocate(initialCapacity), compression,
-            TimestampType.CREATE_TIME, 0L, initialCapacity);
+            TimestampType.CREATE_TIME, 0L, hardLimitBytes);
     }
 
-    boolean hasRoomFor(long timestamp, byte[] key, byte[] value, Header[] headers) {
-        return !sealed && builder.hasRoomFor(timestamp, key, value, headers);
+    /**
+     * @param softLimitBytes the currently applicable size target: {@code batch.size} when the
+     *                       destination can send right away, {@code backpressure.batch.size}
+     *                       while its in-flight window is saturated
+     */
+    boolean hasRoomFor(long timestamp, byte[] key, byte[] value, Header[] headers, int softLimitBytes) {
+        if (sealed || !builder.hasRoomFor(timestamp, key, value, headers))
+            return false;
+        return builder.estimatedSizeInBytes() < softLimitBytes;
     }
 
     CompletableFuture<RecordMetadataV2> append(long timestamp, byte[] key, byte[] value, Header[] headers) {
@@ -75,8 +87,13 @@ public final class BatchV2 {
         return future;
     }
 
+    /** Full against the hard (backpressure) limit. */
     boolean isFull() {
         return sealed || builder.isFull();
+    }
+
+    int estimatedSizeInBytes() {
+        return builder.estimatedSizeInBytes();
     }
 
     boolean isEmpty() {

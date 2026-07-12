@@ -72,9 +72,42 @@ public final class DefaultAsyncProducer<K, V> implements AsyncProducer<K, V> {
         this.dispatcher = new NetworkRequestDispatcher(runtime, settings.client());
         this.metadata = new MetadataManager(runtime, dispatcher, settings.client());
         this.accumulator = new RecordAccumulatorV2(settings,
-            new MemoryLimiter(settings.bufferMemory()), BatchSealer.NO_OP);
+            new MemoryLimiter(settings.bufferMemory()), BatchSealer.NO_OP,
+            new LeaderBackpressureSignal(dispatcher, metadata));
         this.sender = new SenderV2(runtime, settings, dispatcher, metadata, accumulator);
         this.sender.start();
+    }
+
+    /**
+     * Backpressure = the partition leader's in-flight window is full (adaptive batch sealing:
+     * seal at {@code batch.size} when sendable, keep batching to {@code backpressure.batch.size}
+     * when not). Uses only the cached cluster view — never triggers I/O from the send path.
+     */
+    private record LeaderBackpressureSignal(NetworkRequestDispatcher dispatcher,
+                                            MetadataManager metadata) implements BackpressureSignal {
+        @Override
+        public boolean isSaturated(org.apache.kafka.common.TopicPartition partition) {
+            org.apache.kafka.common.Cluster cluster = metadata.cachedCluster();
+            if (cluster == null)
+                return false;
+            org.apache.kafka.common.Node leader = cluster.leaderFor(partition);
+            return leader != null && !leader.isEmpty() && dispatcher.isSaturated(leader);
+        }
+
+        @Override
+        public boolean isTopicSaturated(String topic) {
+            org.apache.kafka.common.Cluster cluster = metadata.cachedCluster();
+            if (cluster == null)
+                return false;
+            var partitions = cluster.availablePartitionsForTopic(topic);
+            if (partitions.isEmpty())
+                return false;
+            for (org.apache.kafka.common.PartitionInfo info : partitions) {
+                if (!dispatcher.isSaturated(info.leader()))
+                    return false; // at least one leader can take a request right away
+            }
+            return true;
+        }
     }
 
     @Override

@@ -27,7 +27,12 @@ import java.util.Objects;
  * (design decision D15); the drain pipeline carries the seams they will use.
  *
  * @param client          shared connection-level settings
- * @param batchSize       target uncompressed bytes per batch (mirrors {@code batch.size})
+ * @param batchSize       target uncompressed bytes per batch when the destination can accept
+ *                        another request right away (mirrors {@code batch.size})
+ * @param backpressureBatchSize batch-size ceiling used while the destination's in-flight
+ *                        window is saturated: since the batch cannot be sent yet anyway, it
+ *                        keeps accepting records up to this size, so the eventual request
+ *                        carries more data ({@code backpressure.batch.size})
  * @param linger          how long a non-full batch may wait for company (mirrors {@code linger.ms})
  * @param compression     compression codec and level (KIP-390 levels supported via
  *                        {@link Compression} builders)
@@ -39,6 +44,7 @@ import java.util.Objects;
 public record ProducerSettings(
     ClientSettings client,
     int batchSize,
+    int backpressureBatchSize,
     Duration linger,
     Compression compression,
     int maxRequestSize,
@@ -52,6 +58,12 @@ public record ProducerSettings(
         Objects.requireNonNull(compression, "compression");
         if (batchSize <= 0)
             throw new IllegalArgumentException("batchSize must be positive");
+        if (backpressureBatchSize < batchSize)
+            throw new IllegalArgumentException("backpressureBatchSize (" + backpressureBatchSize
+                + ") must be >= batchSize (" + batchSize + ")");
+        if (backpressureBatchSize > maxRequestSize)
+            throw new IllegalArgumentException("backpressureBatchSize (" + backpressureBatchSize
+                + ") must fit in maxRequestSize (" + maxRequestSize + ")");
         if (acks != 1 && acks != -1)
             throw new IllegalArgumentException("acks must be 1 or -1 (acks=0 needs fire-and-forget "
                 + "support in the transport's correlation layer, which is not implemented yet)");
@@ -64,6 +76,7 @@ public record ProducerSettings(
     public static final class Builder {
         private final ClientSettings client;
         private int batchSize = 16 * 1024;
+        private int backpressureBatchSize = 0; // 0 → derived default in build()
         private Duration linger = Duration.ZERO;
         private Compression compression = Compression.NONE;
         private int maxRequestSize = 1024 * 1024;
@@ -77,6 +90,12 @@ public record ProducerSettings(
 
         public Builder batchSize(int batchSize) {
             this.batchSize = batchSize;
+            return this;
+        }
+
+        /** Set equal to {@code batchSize} to disable backpressure-adaptive batching. */
+        public Builder backpressureBatchSize(int backpressureBatchSize) {
+            this.backpressureBatchSize = backpressureBatchSize;
             return this;
         }
 
@@ -111,8 +130,11 @@ public record ProducerSettings(
         }
 
         public ProducerSettings build() {
-            return new ProducerSettings(client, batchSize, linger, compression,
-                maxRequestSize, bufferMemory, acks, retries);
+            int effectiveBackpressureBatchSize = backpressureBatchSize != 0
+                ? backpressureBatchSize
+                : (int) Math.min(4L * batchSize, maxRequestSize);
+            return new ProducerSettings(client, batchSize, effectiveBackpressureBatchSize, linger,
+                compression, maxRequestSize, bufferMemory, acks, retries);
         }
     }
 }

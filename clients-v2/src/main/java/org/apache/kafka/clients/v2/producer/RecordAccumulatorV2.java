@@ -47,38 +47,52 @@ final class RecordAccumulatorV2 {
     private final ProducerSettings settings;
     private final MemoryLimiter limiter;
     private final BatchSealer sealer;
+    private final BackpressureSignal backpressure;
 
     private final ConcurrentMap<TopicPartition, Deque<BatchV2>> bound = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, Deque<BatchV2>> unbound = new ConcurrentHashMap<>();
     private final Set<BatchV2> incomplete = ConcurrentHashMap.newKeySet();
     private volatile boolean flushRequested = false;
 
-    RecordAccumulatorV2(ProducerSettings settings, MemoryLimiter limiter, BatchSealer sealer) {
+    RecordAccumulatorV2(ProducerSettings settings, MemoryLimiter limiter, BatchSealer sealer,
+                        BackpressureSignal backpressure) {
         this.settings = settings;
         this.limiter = limiter;
         this.sealer = sealer;
+        this.backpressure = backpressure;
     }
 
-    /** Append to a bound (Fixed) or unbound (Deferred) queue. */
+    /**
+     * Append to a bound (Fixed) or unbound (Deferred) queue.
+     *
+     * <p>Adaptive sealing: a batch normally stops accepting records at {@code batch.size},
+     * but while the destination's in-flight window is saturated it keeps growing up to
+     * {@code backpressure.batch.size} — it cannot be sent yet anyway, and one large request
+     * beats several small ones once the window opens.
+     */
     CompletableFuture<RecordMetadataV2> append(String topic, PartitionAssignment assignment,
                                                long timestamp, byte[] key, byte[] value,
                                                Header[] headers, long nowMs) {
         Deque<BatchV2> queue;
         TopicPartition partition;
+        boolean saturated;
         if (assignment instanceof PartitionAssignment.Fixed fixed) {
             partition = new TopicPartition(topic, fixed.partition());
             queue = bound.computeIfAbsent(partition, tp -> new ArrayDeque<>());
+            saturated = backpressure.isSaturated(partition);
         } else {
             partition = null;
             queue = unbound.computeIfAbsent(topic, t -> new ArrayDeque<>());
+            saturated = backpressure.isTopicSaturated(topic);
         }
+        int softLimit = saturated ? settings.backpressureBatchSize() : settings.batchSize();
         synchronized (queue) {
             BatchV2 last = queue.peekLast();
-            if (last != null && last.hasRoomFor(timestamp, key, value, headers))
+            if (last != null && last.hasRoomFor(timestamp, key, value, headers, softLimit))
                 return last.append(timestamp, key, value, headers);
             limiter.acquireNow(settings.batchSize());
-            BatchV2 batch = new BatchV2(partition, settings.batchSize(), settings.compression(),
-                nowMs, settings.batchSize());
+            BatchV2 batch = new BatchV2(partition, settings.batchSize(),
+                settings.backpressureBatchSize(), settings.compression(), nowMs, settings.batchSize());
             incomplete.add(batch);
             batch.doneFuture().whenComplete((v, e) -> {
                 incomplete.remove(batch);
@@ -129,6 +143,10 @@ final class RecordAccumulatorV2 {
     /**
      * Drain sealed, leader-routable batches grouped by destination node, up to
      * {@code max.request.size} per node per round.
+     *
+     * <p>Partitions whose leader is saturated (in-flight window full) are skipped
+     * <em>without sealing</em>: their open batch keeps accepting records up to
+     * {@code backpressure.batch.size} until the window opens.
      */
     Map<Node, List<BatchV2>> drain(Cluster cluster, long nowMs) {
         bindReadyUnboundBatches(cluster, nowMs);
@@ -139,6 +157,8 @@ final class RecordAccumulatorV2 {
             Node leader = cluster.leaderFor(entry.getKey());
             if (leader == null || leader.isEmpty())
                 continue; // metadata refresh will find the new leader
+            if (backpressure.isSaturated(entry.getKey()))
+                continue; // can't send anyway; let the open batch keep batching
             Deque<BatchV2> queue = entry.getValue();
             synchronized (queue) {
                 // At most ONE batch per partition per request: a ProduceRequest carries a single
@@ -168,14 +188,16 @@ final class RecordAccumulatorV2 {
         if (batch.isEmpty())
             return false;
         return batch.isSealed() // a retry re-enqueue
-            || batch.isFull()
+            || batch.isFull() // hard (backpressure.batch.size) limit
+            || batch.estimatedSizeInBytes() >= settings.batchSize() // normal target reached
             || flushRequested
             || nowMs - batch.createdMs() >= settings.linger().toMillis();
     }
 
     /**
      * Late binding (D14): assign drainable unbound batches to the shortest bound queue among
-     * partitions whose leader is currently available.
+     * partitions whose leader is currently available <em>and not saturated</em>. If every
+     * leader is saturated the batch stays unbound and keeps batching (backpressure sealing).
      */
     private void bindReadyUnboundBatches(Cluster cluster, long nowMs) {
         for (Map.Entry<String, Deque<BatchV2>> entry : unbound.entrySet()) {
@@ -190,6 +212,8 @@ final class RecordAccumulatorV2 {
                     if (available.isEmpty())
                         break; // no live leaders; batch stays unbound and re-bindable
                     TopicPartition target = shortestQueuePartition(available);
+                    if (target == null)
+                        break; // all leaders saturated; can't send anyway, keep batching
                     queue.pollFirst();
                     batch.bind(target);
                     Deque<BatchV2> boundQueue = bound.computeIfAbsent(target, tp -> new ArrayDeque<>());
@@ -206,6 +230,8 @@ final class RecordAccumulatorV2 {
         int bestDepth = Integer.MAX_VALUE;
         for (PartitionInfo info : available) {
             TopicPartition tp = new TopicPartition(info.topic(), info.partition());
+            if (backpressure.isSaturated(tp))
+                continue;
             Deque<BatchV2> queue = bound.get(tp);
             int depth = queue == null ? 0 : queue.size();
             if (depth < bestDepth) {
