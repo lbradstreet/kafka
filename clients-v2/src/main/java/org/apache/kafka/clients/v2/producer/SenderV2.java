@@ -32,6 +32,7 @@ import org.apache.kafka.common.requests.ProduceResponse;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -159,7 +160,15 @@ final class SenderV2 {
         // A batch polled out of the accumulator is owned by this method: every exit path —
         // including unexpected exceptions — must complete or re-enqueue it, or its futures hang.
         try {
-            doSendProduceRequest(node, batches, cluster);
+            // Connection pooling (#4): split the node's batches by the connection each
+            // partition is pinned to, so different partitions pipeline in parallel while a
+            // partition keeps a single ordered connection. One ProduceRequest per connection.
+            Map<Integer, List<BatchV2>> byConnection = new HashMap<>();
+            for (BatchV2 batch : batches)
+                byConnection.computeIfAbsent(dispatcher.connectionIndex(batch.partition()),
+                    c -> new ArrayList<>()).add(batch);
+            for (Map.Entry<Integer, List<BatchV2>> entry : byConnection.entrySet())
+                doSendProduceRequest(node, entry.getKey(), entry.getValue(), cluster);
         } catch (Throwable t) {
             log.warn("Failed to build/dispatch produce request to {}", node, t);
             for (BatchV2 batch : batches)
@@ -167,7 +176,8 @@ final class SenderV2 {
         }
     }
 
-    private void doSendProduceRequest(Node node, List<BatchV2> batches, Cluster cluster) {
+    private void doSendProduceRequest(Node node, int connectionIndex, List<BatchV2> batches,
+                                      Cluster cluster) {
         Map<TopicPartition, BatchV2> byPartition = new HashMap<>();
         Map<Uuid, String> idToName = new HashMap<>();
         ProduceRequestData.TopicProduceDataCollection topicData =
@@ -195,7 +205,7 @@ final class SenderV2 {
             .setTimeoutMs((int) settings.client().requestTimeout().toMillis())
             .setTopicData(topicData));
 
-        dispatcher.send(node, request).whenComplete((response, error) -> {
+        dispatcher.send(node, connectionIndex, request).whenComplete((response, error) -> {
             try {
                 if (error != null) {
                     Throwable cause = error instanceof CompletionException && error.getCause() != null

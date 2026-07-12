@@ -17,6 +17,7 @@
 package org.apache.kafka.clients.v2;
 
 import org.apache.kafka.common.Node;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.requests.AbstractRequest;
 import org.apache.kafka.common.requests.AbstractResponse;
 import org.apache.kafka.network.netty.ConnectionSpec;
@@ -63,11 +64,32 @@ public final class NetworkRequestDispatcher implements AutoCloseable {
             .build();
     }
 
-    /** Send to a specific broker node (leaders, coordinators). */
+    /** Send to a specific broker node on the pool's first connection (metadata, coordinators). */
     public CompletableFuture<AbstractResponse> send(Node node, AbstractRequest.Builder<?> request) {
+        return send(node, 0, request);
+    }
+
+    /**
+     * Send to a specific broker over a specific connection of its pool (connection pooling, #4).
+     * The producer pins a partition to a connection via {@link #connectionIndex(TopicPartition)}
+     * so all requests for that partition share one connection and stay ordered, while different
+     * partitions spread across the pool for parallel pipelines.
+     */
+    public CompletableFuture<AbstractResponse> send(Node node, int connectionIndex,
+                                                    AbstractRequest.Builder<?> request) {
         InetSocketAddress address = InetSocketAddress.createUnresolved(node.host(), node.port());
-        return connectionTo(node.idString(), address)
+        return connectionTo(connectionId(node, connectionIndex), address)
             .thenCompose(connection -> connection.send(request));
+    }
+
+    /** The pool connection index a partition is pinned to (stable, ordering-preserving). */
+    public int connectionIndex(TopicPartition partition) {
+        int k = settings.connectionsPerBroker();
+        return k == 1 ? 0 : Math.floorMod(partition.hashCode(), k);
+    }
+
+    private static String connectionId(Node node, int connectionIndex) {
+        return node.idString() + "#" + connectionIndex;
     }
 
     /**
@@ -92,13 +114,21 @@ public final class NetworkRequestDispatcher implements AutoCloseable {
             .thenCompose(connection -> connection.send(request));
     }
 
-    /**
-     * @return true if the node's connection exists and cannot accept another request right now
-     *         — its in-flight window is full or the broker has throttled it (KIP-219). Further
-     *         requests would only queue locally. Advisory: races only shift batching behavior.
-     */
+    /** @see #isSaturated(Node, int) — the pool's first connection. */
     public boolean isSaturated(Node node) {
-        CompletableFuture<KafkaConnection> future = connections.get(node.idString());
+        return isSaturated(node, 0);
+    }
+
+    /**
+     * @return true if the given pool connection exists and cannot accept another request right
+     *         now — its in-flight window is full or the broker has throttled it (KIP-219).
+     *         Because backpressure is judged per connection, a partition on a full connection
+     *         is backpressured while a partition on an idle connection of the same broker is
+     *         not — pipeline depth is per-partition, not per-broker (#3). Advisory: races only
+     *         shift batching behavior.
+     */
+    public boolean isSaturated(Node node, int connectionIndex) {
+        CompletableFuture<KafkaConnection> future = connections.get(connectionId(node, connectionIndex));
         KafkaConnection connection = future == null ? null : future.getNow(null);
         return connection != null && connection.isOpen() && connection.isSendBlocked();
     }

@@ -34,6 +34,12 @@ import java.util.Objects;
  * @param metadataMaxAge   how long cached metadata stays fresh (mirrors {@code metadata.max.age.ms})
  * @param retryBackoff     delay between retries of retriable operations
  * @param maxInFlight      per-connection in-flight request window
+ * @param connectionsPerBroker number of parallel connections to open to each broker. Each
+ *                        connection has its own in-flight window, so aggregate per-broker
+ *                        pipeline depth is {@code connectionsPerBroker × maxInFlight} — the
+ *                        lever for saturating a high-latency broker. Partitions are pinned to
+ *                        a connection by affinity so per-partition ordering is preserved.
+ *                        Default 1 reproduces the classic single-connection-per-broker model.
  */
 public record ClientSettings(
     List<InetSocketAddress> bootstrapServers,
@@ -43,7 +49,8 @@ public record ClientSettings(
     Duration connectTimeout,
     Duration metadataMaxAge,
     Duration retryBackoff,
-    int maxInFlight
+    int maxInFlight,
+    int connectionsPerBroker
 ) {
 
     public ClientSettings {
@@ -53,6 +60,8 @@ public record ClientSettings(
         bootstrapServers = List.copyOf(bootstrapServers);
         Objects.requireNonNull(clientId, "clientId");
         Objects.requireNonNull(security, "security");
+        if (connectionsPerBroker < 1)
+            throw new IllegalArgumentException("connectionsPerBroker must be >= 1");
     }
 
     public static Builder newBuilder(String bootstrap) {
@@ -82,6 +91,7 @@ public record ClientSettings(
         private Duration metadataMaxAge = Duration.ofMinutes(5);
         private Duration retryBackoff = Duration.ofMillis(100);
         private int maxInFlight = 5;
+        private int connectionsPerBroker = 1;
 
         private Builder(List<InetSocketAddress> bootstrapServers) {
             this.bootstrapServers = bootstrapServers;
@@ -122,9 +132,14 @@ public record ClientSettings(
             return this;
         }
 
+        public Builder connectionsPerBroker(int connectionsPerBroker) {
+            this.connectionsPerBroker = connectionsPerBroker;
+            return this;
+        }
+
         public ClientSettings build() {
             return new ClientSettings(bootstrapServers, clientId, security, requestTimeout,
-                connectTimeout, metadataMaxAge, retryBackoff, maxInFlight);
+                connectTimeout, metadataMaxAge, retryBackoff, maxInFlight, connectionsPerBroker);
         }
     }
 }

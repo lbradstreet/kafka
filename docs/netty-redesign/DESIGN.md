@@ -71,6 +71,20 @@ keyed/late-bound assignments, consumed back and compared exactly):
   overload). Measured allocation-per-record on the full v2 accumulation path drops
   **49–96 %** for LZ4/ZSTD; buffer pooling alone removes the entire ~16 KB per-batch
   allocation for uncompressed batches. See [BENCHMARKS.md](BENCHMARKS.md).
+- **Connection pooling + per-partition pipeline depth (D16)** — landed. Per-connection
+  throughput is bandwidth-delay-bound at `maxInFlight × maxRequestSize / RTT`, so a
+  high-latency broker caps out regardless of demand. `connections.per.broker` opens K
+  parallel connections to each broker; a partition is pinned to one by affinity
+  (`NetworkRequestDispatcher.connectionIndex`), preserving per-partition order while
+  spreading partitions across independent pipelines. The sender builds one `ProduceRequest`
+  per connection and the accumulator caps the drain per `(node, connection)` at
+  `max.request.size` (not per node), so each connection fills a full request; backpressure
+  is judged per the partition's own connection, decoupling depth from a single per-broker
+  window (#3). Aggregate ceiling becomes `K × maxInFlight × maxRequestSize / RTT`. The DST
+  scenario shows a request-size-bound workload against a 50 ms broker finishing **> 3×
+  faster** with 4 connections than 1, with per-partition delivery intact; verified against
+  a real broker with `connections.per.broker=3`. Default K=1 reproduces the classic
+  single-connection model.
 
 **Scope note:** this effort is producer-focused. Consumer groups, fetch sessions and other
 consumer-side depth are **deferred indefinitely** — the assign-based consumer exists only

@@ -68,6 +68,7 @@ public class V2ClientEndToEndTest {
         clientSettings = ClientSettings.newBuilder(System.getenv("KAFKA_V2_IT_BOOTSTRAP"))
             .clientId("v2-e2e")
             .requestTimeout(Duration.ofSeconds(20))
+            .connectionsPerBroker(3) // exercise connection pooling (#4) against a real broker
             .build();
     }
 

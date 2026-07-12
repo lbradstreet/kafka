@@ -73,15 +73,18 @@ public final class DefaultAsyncProducer<K, V> implements AsyncProducer<K, V> {
         this.metadata = new MetadataManager(runtime, dispatcher, settings.client());
         this.accumulator = new RecordAccumulatorV2(settings,
             new MemoryLimiter(settings.bufferMemory()), BatchSealer.NO_OP,
-            new LeaderBackpressureSignal(dispatcher, metadata));
+            new LeaderBackpressureSignal(dispatcher, metadata),
+            dispatcher::connectionIndex);
         this.sender = new SenderV2(runtime, settings, dispatcher, metadata, accumulator);
         this.sender.start();
     }
 
     /**
-     * Backpressure = the partition leader's in-flight window is full (adaptive batch sealing:
-     * seal at {@code batch.size} when sendable, keep batching to {@code backpressure.batch.size}
-     * when not). Uses only the cached cluster view — never triggers I/O from the send path.
+     * Backpressure = the connection a partition is pinned to cannot send right now (its
+     * in-flight window is full or the broker throttled it). Because the signal is judged per
+     * the partition's own pool connection (#3/#4), a partition on a busy connection batches
+     * larger while a partition on an idle connection of the same broker keeps sealing normally.
+     * Uses only the cached cluster view — never triggers I/O from the send path.
      */
     private record LeaderBackpressureSignal(NetworkRequestDispatcher dispatcher,
                                             MetadataManager metadata) implements BackpressureSignal {
@@ -91,7 +94,8 @@ public final class DefaultAsyncProducer<K, V> implements AsyncProducer<K, V> {
             if (cluster == null)
                 return false;
             org.apache.kafka.common.Node leader = cluster.leaderFor(partition);
-            return leader != null && !leader.isEmpty() && dispatcher.isSaturated(leader);
+            return leader != null && !leader.isEmpty()
+                && dispatcher.isSaturated(leader, dispatcher.connectionIndex(partition));
         }
 
         @Override
@@ -103,8 +107,9 @@ public final class DefaultAsyncProducer<K, V> implements AsyncProducer<K, V> {
             if (partitions.isEmpty())
                 return false;
             for (org.apache.kafka.common.PartitionInfo info : partitions) {
-                if (!dispatcher.isSaturated(info.leader()))
-                    return false; // at least one leader can take a request right away
+                var tp = new org.apache.kafka.common.TopicPartition(info.topic(), info.partition());
+                if (!dispatcher.isSaturated(info.leader(), dispatcher.connectionIndex(tp)))
+                    return false; // at least one partition's connection can take a request now
             }
             return true;
         }

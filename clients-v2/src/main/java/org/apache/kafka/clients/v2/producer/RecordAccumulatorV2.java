@@ -48,6 +48,7 @@ public final class RecordAccumulatorV2 {
     private final MemoryLimiter limiter;
     private final BatchSealer sealer;
     private final BackpressureSignal backpressure;
+    private final java.util.function.ToIntFunction<TopicPartition> connectionIndex;
     private final BatchBufferSource buffers;
     private final org.apache.kafka.common.compress.Compression compression;
 
@@ -58,10 +59,22 @@ public final class RecordAccumulatorV2 {
 
     public RecordAccumulatorV2(ProducerSettings settings, MemoryLimiter limiter, BatchSealer sealer,
                         BackpressureSignal backpressure) {
+        this(settings, limiter, sealer, backpressure, tp -> 0);
+    }
+
+    /**
+     * @param connectionIndex the pool connection a partition is pinned to; the drain caps each
+     *                        {@code (node, connection)} at {@code max.request.size} so every
+     *                        connection can build a full request (connection pooling, #4).
+     */
+    public RecordAccumulatorV2(ProducerSettings settings, MemoryLimiter limiter, BatchSealer sealer,
+                        BackpressureSignal backpressure,
+                        java.util.function.ToIntFunction<TopicPartition> connectionIndex) {
         this.settings = settings;
         this.limiter = limiter;
         this.sealer = sealer;
         this.backpressure = backpressure;
+        this.connectionIndex = connectionIndex;
         this.buffers = new BatchBufferSource(settings.batchSize(),
             (int) Math.min(1024, Math.max(2, settings.bufferMemory() / settings.batchSize())));
         // Pool per-batch compression workspaces (lz4's two ~64KB arrays) across batches (D12).
@@ -201,22 +214,25 @@ public final class RecordAccumulatorV2 {
 
     /**
      * Drain sealed, leader-routable batches grouped by destination node, up to
-     * {@code max.request.size} per node per round.
+     * {@code max.request.size} per {@code (node, connection)} per round — so each pooled
+     * connection to a broker can build its own full request in parallel (#4).
      *
-     * <p>Partitions whose leader is saturated (in-flight window full) are skipped
-     * <em>without sealing</em>: their open batch keeps accepting records up to
-     * {@code backpressure.batch.size} until the window opens.
+     * <p>Partitions whose connection is saturated (in-flight window full or throttled) are
+     * skipped <em>without sealing</em>: their open batch keeps accepting records up to
+     * {@code backpressure.batch.size} until the connection can send.
      */
     public Map<Node, List<BatchV2>> drain(Cluster cluster, long nowMs) {
         bindReadyUnboundBatches(cluster, nowMs);
 
         Map<Node, List<BatchV2>> drained = new HashMap<>();
-        Map<Node, Integer> nodeBytes = new HashMap<>();
+        // Byte budget is per (node, connection), keyed "<nodeId>#<connIndex>".
+        Map<String, Integer> connectionBytes = new HashMap<>();
         for (Map.Entry<TopicPartition, Deque<BatchV2>> entry : bound.entrySet()) {
-            Node leader = cluster.leaderFor(entry.getKey());
+            TopicPartition tp = entry.getKey();
+            Node leader = cluster.leaderFor(tp);
             if (leader == null || leader.isEmpty())
                 continue; // metadata refresh will find the new leader
-            if (backpressure.isSaturated(entry.getKey()))
+            if (backpressure.isSaturated(tp))
                 continue; // can't send anyway; let the open batch keep batching
             Deque<BatchV2> queue = entry.getValue();
             synchronized (queue) {
@@ -228,7 +244,8 @@ public final class RecordAccumulatorV2 {
                 int size = batch.isSealed()
                     ? batch.records().sizeInBytes()
                     : settings.batchSize();
-                int used = nodeBytes.getOrDefault(leader, 0);
+                String connKey = leader.idString() + "#" + connectionIndex.applyAsInt(tp);
+                int used = connectionBytes.getOrDefault(connKey, 0);
                 if (used > 0 && used + size > settings.maxRequestSize())
                     continue;
                 queue.pollFirst();
@@ -236,7 +253,7 @@ public final class RecordAccumulatorV2 {
                     batch.seal();
                     sealer.seal(batch, batch.partition());
                 }
-                nodeBytes.merge(leader, batch.records().sizeInBytes(), Integer::sum);
+                connectionBytes.merge(connKey, batch.records().sizeInBytes(), Integer::sum);
                 drained.computeIfAbsent(leader, n -> new ArrayList<>()).add(batch);
             }
         }
