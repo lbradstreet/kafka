@@ -50,14 +50,27 @@ import java.util.List;
  */
 public final class SimBroker {
 
+    /** A serialized response frame plus how long the broker took to produce it. */
+    public record Response(byte[] frame, long processingDelayMs) { }
+
     private final int id;
     private final SimCluster cluster;
     private final SimTrace trace;
+    private final BrokerTimingModel timingModel;
+    private final ProduceObserver observer;
+    private int produceCount = 0;
 
     public SimBroker(int id, SimCluster cluster, SimTrace trace) {
+        this(id, cluster, trace, BrokerTimingModel.INSTANT, ProduceObserver.NONE);
+    }
+
+    public SimBroker(int id, SimCluster cluster, SimTrace trace, BrokerTimingModel timingModel,
+                     ProduceObserver observer) {
         this.id = id;
         this.cluster = cluster;
         this.trace = trace;
+        this.timingModel = timingModel;
+        this.observer = observer;
     }
 
     public int id() {
@@ -66,9 +79,10 @@ public final class SimBroker {
 
     /**
      * @param requestFrame a full request frame including the 4-byte length prefix
-     * @return the full response frame including the 4-byte length prefix
+     * @return the full response frame including the 4-byte length prefix, plus the broker's
+     *         processing delay (see {@link BrokerTimingModel})
      */
-    public byte[] handle(byte[] requestFrame) {
+    public Response handle(byte[] requestFrame) {
         ByteBuffer buffer = ByteBuffer.wrap(requestFrame);
         int declaredSize = buffer.getInt();
         if (declaredSize != buffer.remaining())
@@ -87,13 +101,17 @@ public final class SimBroker {
                     + " — extend it deliberately rather than silently");
         };
 
+        if (header.apiKey() == ApiKeys.PRODUCE)
+            produceCount++;
+        long processingDelayMs = timingModel.processingDelayMs(header.apiKey(), produceCount);
+
         ByteBuffer payload = RequestTestUtils.serializeResponseWithHeader(response,
             header.apiVersion(), header.correlationId());
         byte[] framed = new byte[4 + payload.remaining()];
         ByteBuffer out = ByteBuffer.wrap(framed);
         out.putInt(payload.remaining());
         out.put(payload);
-        return framed;
+        return new Response(framed, processingDelayMs);
     }
 
     private AbstractResponse handleApiVersions() {
@@ -142,6 +160,8 @@ public final class SimBroker {
 
     private AbstractResponse handleProduce(org.apache.kafka.common.requests.ProduceRequest request) {
         ProduceResponseData responseData = new ProduceResponseData();
+        int requestRecords = 0;
+        int requestBytes = 0;
         for (ProduceRequestData.TopicProduceData topicData : request.data().topicData()) {
             String topic = topicData.name() == null || topicData.name().isEmpty()
                 ? cluster.topicName(topicData.topicId())
@@ -160,8 +180,10 @@ public final class SimBroker {
                     trace.add("broker-" + id + " produce NOT_LEADER " + tp);
                     partitionResponse.setErrorCode(Errors.NOT_LEADER_OR_FOLLOWER.code()).setBaseOffset(-1);
                 } else {
-                    List<SimCluster.StoredRecord> stored =
-                        validateAndExtract((MemoryRecords) partitionData.records());
+                    MemoryRecords records = (MemoryRecords) partitionData.records();
+                    requestBytes += records.sizeInBytes();
+                    List<SimCluster.StoredRecord> stored = validateAndExtract(records);
+                    requestRecords += stored.size();
                     long baseOffset = cluster.append(tp, stored);
                     trace.add("broker-" + id + " produce " + tp + " base=" + baseOffset
                         + " count=" + stored.size());
@@ -171,6 +193,7 @@ public final class SimBroker {
             }
             responseData.responses().add(topicResponse);
         }
+        observer.onProduceRequest(id, requestRecords, requestBytes);
         return new org.apache.kafka.common.requests.ProduceResponse(responseData);
     }
 

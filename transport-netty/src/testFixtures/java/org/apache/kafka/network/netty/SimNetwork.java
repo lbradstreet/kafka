@@ -55,12 +55,19 @@ public final class SimNetwork {
     private final SimScheduler scheduler;
     private final FaultInjector faults;
     private final SimTrace trace;
+    private final ProduceObserver observer;
     private final Map<Integer, SimBroker> brokers = new HashMap<>();
 
     public SimNetwork(SimScheduler scheduler, FaultInjector faults, SimTrace trace) {
+        this(scheduler, faults, trace, ProduceObserver.NONE);
+    }
+
+    public SimNetwork(SimScheduler scheduler, FaultInjector faults, SimTrace trace,
+                      ProduceObserver observer) {
         this.scheduler = scheduler;
         this.faults = faults;
         this.trace = trace;
+        this.observer = observer;
     }
 
     public void addBroker(SimBroker broker) {
@@ -85,9 +92,14 @@ public final class SimNetwork {
         frame.release();
         if (!endpoint.open)
             return;
-        if (faults.dropRequest(endpoint.connectionId))
+        // The frame is now on the wire (in flight) until its response is delivered.
+        observer.onFrameSent(endpoint.connectionId);
+        if (faults.dropRequest(endpoint.connectionId)) {
+            observer.onResponseDelivered(endpoint.connectionId); // never answered; clear in-flight
             return; // the client's request timeout handles it
+        }
         if (faults.disconnect(endpoint.connectionId)) {
+            observer.onResponseDelivered(endpoint.connectionId);
             scheduler.execute(() -> closeEndpoint(endpoint));
             return;
         }
@@ -97,17 +109,25 @@ public final class SimNetwork {
     }
 
     private void deliverToBroker(Endpoint endpoint, byte[] requestFrame) {
-        if (!endpoint.open)
+        if (!endpoint.open) {
+            observer.onResponseDelivered(endpoint.connectionId);
             return;
-        byte[] responseFrame = endpoint.broker.handle(requestFrame);
-        if (faults.dropResponse(endpoint.connectionId))
+        }
+        SimBroker.Response response = endpoint.broker.handle(requestFrame);
+        if (faults.dropResponse(endpoint.connectionId)) {
+            observer.onResponseDelivered(endpoint.connectionId);
             return;
-        long deliverAt = orderPreservingDeliveryTime(endpoint.nextBrokerToClientMs);
+        }
+        // Broker processing time delays the response but never reorders it: the max() with
+        // the previous departure keeps responses FIFO on the connection (head-of-line).
+        long deliverAt = orderPreservingDeliveryTime(
+            endpoint.nextBrokerToClientMs, response.processingDelayMs());
         endpoint.nextBrokerToClientMs = deliverAt;
-        scheduleAt(deliverAt, () -> deliverToClient(endpoint, responseFrame));
+        scheduleAt(deliverAt, () -> deliverToClient(endpoint, response.frame()));
     }
 
     private void deliverToClient(Endpoint endpoint, byte[] responseFrame) {
+        observer.onResponseDelivered(endpoint.connectionId);
         if (!endpoint.open || !endpoint.channel.isActive())
             return;
         endpoint.channel.writeInbound(Unpooled.wrappedBuffer(responseFrame));
@@ -124,7 +144,12 @@ public final class SimNetwork {
     }
 
     private long orderPreservingDeliveryTime(long previousDeliveryMs) {
-        long candidate = scheduler.time().milliseconds() + BASE_LATENCY_MS + faults.extraDelayMs();
+        return orderPreservingDeliveryTime(previousDeliveryMs, 0L);
+    }
+
+    private long orderPreservingDeliveryTime(long previousDeliveryMs, long extraProcessingMs) {
+        long candidate = scheduler.time().milliseconds()
+            + BASE_LATENCY_MS + faults.extraDelayMs() + extraProcessingMs;
         return Math.max(candidate, previousDeliveryMs);
     }
 

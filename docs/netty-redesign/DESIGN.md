@@ -50,7 +50,14 @@ keyed/late-bound assignments, consumed back and compared exactly):
   a scheduler seam in `ConnectionSpec`. Tests: 20-seed quiet-network exactly-once sweep,
   same-seed trace-equality under faults, 20-seed faulty-network liveness +
   no-invented-acks sweep, and a D14 rebind-under-total-leader-failover scenario — all in
-  seconds of wall clock.
+  seconds of wall clock. A `BrokerTimingModel` seam (per-broker processing latency: constant,
+  seeded-jitter, slow-after-N) plus a structured `ProduceObserver` (records-per-request,
+  per-broker distribution, on-the-wire in-flight high-water) let scenarios simulate *how*
+  batching and pipelining respond to broker speed: a slow broker fills the 5-deep in-flight
+  window and backpressure sealing then packs more records into fewer requests; a
+  one-slow-node cluster is served without the fast node stalling behind the slow one; and
+  late binding (D14) shifts load onto the faster broker. Timing-driven runs stay
+  seed-deterministic.
 - **Producer hot-path optimizations (D9b, D12)** — landed with comparative JMH benchmarks
   (`jmh-benchmarks/.../producer/`). Compression-ratio seeding, pooled batch buffers
   (`BatchBufferSource`, recycle-on-success only), full-size allocation for batches born

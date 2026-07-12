@@ -19,8 +19,10 @@ package org.apache.kafka.clients.v2.dst;
 import org.apache.kafka.clients.v2.ClientSettings;
 import org.apache.kafka.clients.v2.KafkaClientRuntime;
 import org.apache.kafka.common.utils.MockTime;
+import org.apache.kafka.network.netty.BrokerTimingModel;
 import org.apache.kafka.network.netty.DirectExecutorService;
 import org.apache.kafka.network.netty.FaultInjector;
+import org.apache.kafka.network.netty.ProduceObserver;
 import org.apache.kafka.network.netty.SimBroker;
 import org.apache.kafka.network.netty.SimCluster;
 import org.apache.kafka.network.netty.SimNetwork;
@@ -31,6 +33,7 @@ import org.apache.kafka.network.netty.SimTransport;
 import java.time.Duration;
 import java.util.List;
 import java.util.function.BooleanSupplier;
+import java.util.function.IntFunction;
 
 /**
  * The deterministic simulation harness (design decision D13): wires the sim runtime —
@@ -51,15 +54,27 @@ public final class DstHarness implements AutoCloseable {
     public final SimScheduler scheduler = new SimScheduler(time);
     public final SimCluster cluster;
     public final FaultInjector faults;
+    public final ProduceObserver observer;
     public final SimNetwork network;
     public final SimTransport transport;
     public final KafkaClientRuntime runtime;
 
     public DstHarness(long seed, FaultInjector.FaultProfile profile, int brokerCount) {
+        this(seed, profile, brokerCount, brokerId -> BrokerTimingModel.INSTANT);
+    }
+
+    /**
+     * @param timing a per-broker (by node id) processing-time model, for simulating slow
+     *               brokers, one-slow-node clusters and latency-driven batching/pipelining
+     */
+    public DstHarness(long seed, FaultInjector.FaultProfile profile, int brokerCount,
+                      IntFunction<BrokerTimingModel> timing) {
         this.cluster = new SimCluster(brokerCount);
         this.faults = new FaultInjector(seed, profile, trace);
-        this.network = new SimNetwork(scheduler, faults, trace);
-        cluster.nodes().forEach(node -> network.addBroker(new SimBroker(node.id(), cluster, trace)));
+        this.observer = new ProduceObserver();
+        this.network = new SimNetwork(scheduler, faults, trace, observer);
+        cluster.nodes().forEach(node -> network.addBroker(
+            new SimBroker(node.id(), cluster, trace, timing.apply(node.id()), observer)));
         this.transport = new SimTransport(network, cluster, scheduler, trace);
         this.runtime = KafkaClientRuntime.newBuilder()
             .transport(transport)
