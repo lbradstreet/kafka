@@ -141,24 +141,24 @@ final class RecordAccumulatorV2 {
                 continue; // metadata refresh will find the new leader
             Deque<BatchV2> queue = entry.getValue();
             synchronized (queue) {
-                BatchV2 batch;
-                while ((batch = queue.peekFirst()) != null) {
-                    if (!isDrainable(batch, nowMs))
-                        break;
-                    int size = batch.isSealed()
-                        ? batch.records().sizeInBytes()
-                        : settings.batchSize();
-                    int used = nodeBytes.getOrDefault(leader, 0);
-                    if (used > 0 && used + size > settings.maxRequestSize())
-                        break;
-                    queue.pollFirst();
-                    if (!batch.isSealed()) {
-                        batch.seal();
-                        sealer.seal(batch, batch.partition());
-                    }
-                    nodeBytes.merge(leader, batch.records().sizeInBytes(), Integer::sum);
-                    drained.computeIfAbsent(leader, n -> new ArrayList<>()).add(batch);
+                // At most ONE batch per partition per request: a ProduceRequest carries a single
+                // records blob per partition, and response completion is keyed by partition.
+                BatchV2 batch = queue.peekFirst();
+                if (batch == null || !isDrainable(batch, nowMs))
+                    continue;
+                int size = batch.isSealed()
+                    ? batch.records().sizeInBytes()
+                    : settings.batchSize();
+                int used = nodeBytes.getOrDefault(leader, 0);
+                if (used > 0 && used + size > settings.maxRequestSize())
+                    continue;
+                queue.pollFirst();
+                if (!batch.isSealed()) {
+                    batch.seal();
+                    sealer.seal(batch, batch.partition());
                 }
+                nodeBytes.merge(leader, batch.records().sizeInBytes(), Integer::sum);
+                drained.computeIfAbsent(leader, n -> new ArrayList<>()).add(batch);
             }
         }
         return drained;

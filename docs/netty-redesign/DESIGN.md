@@ -1,7 +1,46 @@
+<!--
+ Licensed to the Apache Software Foundation (ASF) under one or more
+ contributor license agreements.  See the NOTICE file distributed with
+ this work for additional information regarding copyright ownership.
+ The ASF licenses this file to You under the Apache License, Version 2.0
+ (the "License"); you may not use this file except in compliance with
+ the License.  You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+-->
+
 # Kafka on Netty: modern client stack redesign (clients-v2)
 
-Status: **proposed** · Baseline: trunk @ `ac0d7e245b` (2026-07-10) · Facts verified in
-[trunk-verification.md](trunk-verification.md) (cited below as **[TV §n]**).
+Status: **in progress — first working implementation landed** · Baseline: trunk @
+`ac0d7e245b` (2026-07-10) · Facts verified in [trunk-verification.md](trunk-verification.md)
+(cited below as **[TV §n]**).
+
+## 0. Implementation status
+
+Landed on this branch (verified end-to-end against a real single-node KRaft broker built
+from this tree — admin describeCluster/createTopic, 500 records produced with LZ4 across
+keyed/late-bound assignments, consumed back and compared exactly):
+
+- `:transport-netty` — `ClientTransport`/`KafkaConnection`/`NettyClientTransport`,
+  length-field framing, FIFO correlation + correlation-id verification (D8), ApiVersions
+  negotiation with v0 downgrade, in-flight window with eager write-ahead (goal 5), request
+  timeouts, TLS wired through `SslFactory`-created engines (KIP-519, untested), zero-copy
+  `Send`→`ByteBuf` conversion. `EmbeddedChannel` unit tests.
+- `:clients-v2` — `KafkaClientRuntime` (D10/D13 seams), `NetworkRequestDispatcher`,
+  `MetadataManager`; producer with `RecordAccumulatorV2` (one batch per partition per
+  request), late binding (D14), no-op `BatchSealer` (D15), `MemoryLimiter` (D9, fail-fast
+  variant); assignment-based consumer (fetch v12, sessionless); minimal admin.
+
+Not yet implemented (per phase plan below): SASL handshake handler, `Selectable` adapter +
+broker flag, simulation runtime/DST harness, pooled receive payloads (responses are copied
+to heap before parse — classic-client parity), chunked compression sink, group membership,
+fetch sessions, acks=0 fire-and-forget, metrics.
 
 ## 1. Goals
 

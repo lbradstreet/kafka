@@ -51,7 +51,8 @@ public final class BatchV2 {
     private volatile TopicPartition partition; // null while unbound (D14)
     private volatile boolean sealed = false;
     private volatile MemoryRecords records;
-    private int attempts = 0;
+    private final java.util.concurrent.atomic.AtomicInteger attempts =
+        new java.util.concurrent.atomic.AtomicInteger();
 
     BatchV2(TopicPartition partition, int initialCapacity, Compression compression, long nowMs,
             int memoryCharged) {
@@ -95,11 +96,11 @@ public final class BatchV2 {
     }
 
     int attempts() {
-        return attempts;
+        return attempts.get();
     }
 
     void incrementAttempts() {
-        attempts++;
+        attempts.incrementAndGet();
     }
 
     TopicPartition partition() {

@@ -121,6 +121,18 @@ final class SenderV2 implements Runnable {
     }
 
     private void sendProduceRequest(Node node, List<BatchV2> batches, Cluster cluster) {
+        // A batch polled out of the accumulator is owned by this method: every exit path —
+        // including unexpected exceptions — must complete or re-enqueue it, or its futures hang.
+        try {
+            doSendProduceRequest(node, batches, cluster);
+        } catch (Throwable t) {
+            log.warn("Failed to build/dispatch produce request to {}", node, t);
+            for (BatchV2 batch : batches)
+                retryOrFail(batch, t, t instanceof RetriableException);
+        }
+    }
+
+    private void doSendProduceRequest(Node node, List<BatchV2> batches, Cluster cluster) {
         Map<TopicPartition, BatchV2> byPartition = new HashMap<>();
         Map<Uuid, String> idToName = new HashMap<>();
         ProduceRequestData.TopicProduceDataCollection topicData =
@@ -149,13 +161,21 @@ final class SenderV2 implements Runnable {
             .setTopicData(topicData));
 
         dispatcher.send(node, request).whenComplete((response, error) -> {
-            if (error != null) {
-                Throwable cause = error instanceof CompletionException && error.getCause() != null
-                    ? error.getCause() : error;
+            try {
+                if (error != null) {
+                    Throwable cause = error instanceof CompletionException && error.getCause() != null
+                        ? error.getCause() : error;
+                    for (BatchV2 batch : byPartition.values())
+                        retryOrFail(batch, cause, cause instanceof RetriableException
+                            || cause instanceof org.apache.kafka.common.errors.TimeoutException);
+                } else {
+                    handleProduceResponse((ProduceResponse) response, byPartition, idToName);
+                }
+            } catch (Throwable t) {
+                // whenComplete would swallow this; fail the remaining batches instead of hanging.
+                log.error("Produce response handling failed for node {}", node, t);
                 for (BatchV2 batch : byPartition.values())
-                    retryOrFail(batch, cause, true);
-            } else {
-                handleProduceResponse((ProduceResponse) response, byPartition, idToName);
+                    batch.completeExceptionally(t);
             }
         });
     }

@@ -19,14 +19,14 @@ package org.apache.kafka.network.netty;
 import org.apache.kafka.common.network.Send;
 import org.apache.kafka.common.network.TransferableChannel;
 
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.CompositeByteBuf;
 import io.netty.buffer.Unpooled;
-
-import java.io.IOException;
-import java.nio.ByteBuffer;
-import java.nio.channels.FileChannel;
 
 /**
  * Drains a {@link Send} into a Netty {@link ByteBuf} without copying heap payloads.

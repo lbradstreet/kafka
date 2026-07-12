@@ -16,11 +16,11 @@
  */
 package org.apache.kafka.network.netty;
 
+import java.nio.ByteBuffer;
+
 import io.netty.buffer.ByteBuf;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
-
-import java.nio.ByteBuffer;
 
 /**
  * Terminal inbound handler: hands decoded response frames to the connection.
