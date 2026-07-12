@@ -93,14 +93,14 @@ public final class NetworkRequestDispatcher implements AutoCloseable {
     }
 
     /**
-     * @return true if the node's connection exists and its in-flight window is full — further
+     * @return true if the node's connection exists and cannot accept another request right now
+     *         — its in-flight window is full or the broker has throttled it (KIP-219). Further
      *         requests would only queue locally. Advisory: races only shift batching behavior.
      */
     public boolean isSaturated(Node node) {
         CompletableFuture<KafkaConnection> future = connections.get(node.idString());
         KafkaConnection connection = future == null ? null : future.getNow(null);
-        return connection != null && connection.isOpen()
-            && connection.inFlightCount() >= settings.maxInFlight();
+        return connection != null && connection.isOpen() && connection.isSendBlocked();
     }
 
     private CompletableFuture<KafkaConnection> connectionTo(String id, InetSocketAddress address) {

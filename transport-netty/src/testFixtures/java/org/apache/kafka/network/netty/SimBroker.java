@@ -57,19 +57,26 @@ public final class SimBroker {
     private final SimCluster cluster;
     private final SimTrace trace;
     private final BrokerTimingModel timingModel;
+    private final ThrottleModel throttleModel;
     private final ProduceObserver observer;
     private int produceCount = 0;
 
     public SimBroker(int id, SimCluster cluster, SimTrace trace) {
-        this(id, cluster, trace, BrokerTimingModel.INSTANT, ProduceObserver.NONE);
+        this(id, cluster, trace, BrokerTimingModel.INSTANT, ThrottleModel.NONE, ProduceObserver.NONE);
     }
 
     public SimBroker(int id, SimCluster cluster, SimTrace trace, BrokerTimingModel timingModel,
                      ProduceObserver observer) {
+        this(id, cluster, trace, timingModel, ThrottleModel.NONE, observer);
+    }
+
+    public SimBroker(int id, SimCluster cluster, SimTrace trace, BrokerTimingModel timingModel,
+                     ThrottleModel throttleModel, ProduceObserver observer) {
         this.id = id;
         this.cluster = cluster;
         this.trace = trace;
         this.timingModel = timingModel;
+        this.throttleModel = throttleModel;
         this.observer = observer;
     }
 
@@ -193,7 +200,12 @@ public final class SimBroker {
             }
             responseData.responses().add(topicResponse);
         }
-        observer.onProduceRequest(id, requestRecords, requestBytes);
+        int throttleMs = throttleModel.throttleMs(produceCount + 1); // +1: counted after handle()
+        if (throttleMs > 0) {
+            responseData.setThrottleTimeMs(throttleMs);
+            trace.add("broker-" + id + " throttle " + throttleMs + "ms");
+        }
+        observer.onProduceRequest(id, requestRecords, requestBytes, throttleMs);
         return new org.apache.kafka.common.requests.ProduceResponse(responseData);
     }
 

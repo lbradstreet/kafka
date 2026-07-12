@@ -56,7 +56,12 @@ keyed/late-bound assignments, consumed back and compared exactly):
   batching and pipelining respond to broker speed: a slow broker fills the 5-deep in-flight
   window and backpressure sealing then packs more records into fewer requests; a
   one-slow-node cluster is served without the fast node stalling behind the slow one; and
-  late binding (D14) shifts load onto the faster broker. Timing-driven runs stay
+  late binding (D14) shifts load onto the faster broker. A `ThrottleModel` seam stamps
+  KIP-219 `throttle_time_ms` into produce responses, and the transport now **honors it**:
+  `NettyKafkaConnection` pauses writes on a throttled connection for the window and reports
+  `isSendBlocked()`, which the dispatcher folds into the backpressure signal (D9b) — so a
+  throttled connection batches larger, and the DST scenario shows throttling absorbed with
+  no loss or timeouts and fewer, larger requests. Timing- and throttle-driven runs stay
   seed-deterministic.
 - **Producer hot-path optimizations (D9b, D12)** — landed with comparative JMH benchmarks
   (`jmh-benchmarks/.../producer/`). Compression-ratio seeding, pooled batch buffers

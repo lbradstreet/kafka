@@ -57,6 +57,13 @@ public interface KafkaConnection {
     /** @return the number of requests written and awaiting a response */
     int inFlightCount();
 
+    /**
+     * @return true if no new request can be written right now — the in-flight window is full
+     *         or the broker has throttled this connection (KIP-219). Callers use this as a
+     *         backpressure signal (design decision D9b).
+     */
+    boolean isSendBlocked();
+
     /** Completes (on the callback executor) when the connection is fully closed. */
     CompletableFuture<Void> closeFuture();
 

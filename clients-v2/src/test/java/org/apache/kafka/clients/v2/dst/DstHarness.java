@@ -29,6 +29,7 @@ import org.apache.kafka.network.netty.SimNetwork;
 import org.apache.kafka.network.netty.SimScheduler;
 import org.apache.kafka.network.netty.SimTrace;
 import org.apache.kafka.network.netty.SimTransport;
+import org.apache.kafka.network.netty.ThrottleModel;
 
 import java.time.Duration;
 import java.util.List;
@@ -69,12 +70,21 @@ public final class DstHarness implements AutoCloseable {
      */
     public DstHarness(long seed, FaultInjector.FaultProfile profile, int brokerCount,
                       IntFunction<BrokerTimingModel> timing) {
+        this(seed, profile, brokerCount, timing, brokerId -> ThrottleModel.NONE);
+    }
+
+    /**
+     * @param throttling a per-broker quota-throttle model (KIP-219 {@code throttle_time_ms}),
+     *                   for simulating a client that pauses under broker throttling
+     */
+    public DstHarness(long seed, FaultInjector.FaultProfile profile, int brokerCount,
+                      IntFunction<BrokerTimingModel> timing, IntFunction<ThrottleModel> throttling) {
         this.cluster = new SimCluster(brokerCount);
         this.faults = new FaultInjector(seed, profile, trace);
         this.observer = new ProduceObserver();
         this.network = new SimNetwork(scheduler, faults, trace, observer);
-        cluster.nodes().forEach(node -> network.addBroker(
-            new SimBroker(node.id(), cluster, trace, timing.apply(node.id()), observer)));
+        cluster.nodes().forEach(node -> network.addBroker(new SimBroker(node.id(), cluster, trace,
+            timing.apply(node.id()), throttling.apply(node.id()), observer)));
         this.transport = new SimTransport(network, cluster, scheduler, trace);
         this.runtime = KafkaClientRuntime.newBuilder()
             .transport(transport)

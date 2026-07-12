@@ -38,12 +38,15 @@ public final class ProduceObserver {
     private final Map<Integer, Integer> requestsPerBroker = new HashMap<>();
     private final Map<Integer, Long> recordsPerBroker = new HashMap<>();
 
+    private int throttledResponses;
+    private int maxThrottleMs;
+
     private final Map<String, Integer> inFlightPerConnection = new HashMap<>();
     private int maxInFlight;
 
     // ----------------------------------------------------------------- broker-side hooks
 
-    void onProduceRequest(int brokerId, int records, int bytes) {
+    void onProduceRequest(int brokerId, int records, int bytes, int throttleMs) {
         if (this == NONE)
             return;
         produceRequests++;
@@ -51,6 +54,10 @@ public final class ProduceObserver {
         maxRecordsPerRequest = Math.max(maxRecordsPerRequest, records);
         requestsPerBroker.merge(brokerId, 1, Integer::sum);
         recordsPerBroker.merge(brokerId, (long) records, Long::sum);
+        if (throttleMs > 0) {
+            throttledResponses++;
+            maxThrottleMs = Math.max(maxThrottleMs, throttleMs);
+        }
     }
 
     // ----------------------------------------------------------------- wire in-flight hooks
@@ -98,5 +105,14 @@ public final class ProduceObserver {
     /** The deepest the on-the-wire pipeline filled on any single connection. */
     public int maxInFlight() {
         return maxInFlight;
+    }
+
+    /** How many produce responses reported a non-zero {@code throttle_time_ms} (KIP-219). */
+    public int throttledResponses() {
+        return throttledResponses;
+    }
+
+    public int maxThrottleMs() {
+        return maxThrottleMs;
     }
 }

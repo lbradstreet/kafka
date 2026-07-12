@@ -73,6 +73,11 @@ final class NettyKafkaConnection implements KafkaConnection {
     // Read from arbitrary threads.
     private volatile NodeApiVersions apiVersions;
     private final AtomicInteger inFlightCount = new AtomicInteger();
+    /**
+     * Outstanding throttle windows (KIP-219); writes pause while > 0. Mutated only on the
+     * event loop; atomic so {@link #isSendBlocked()} reads it safely from other threads.
+     */
+    private final AtomicInteger throttleWindows = new AtomicInteger();
 
     /** Completes on the event loop when negotiation finishes; the transport re-dispatches it. */
     private final CompletableFuture<KafkaConnection> readyFuture = new CompletableFuture<>();
@@ -122,6 +127,14 @@ final class NettyKafkaConnection implements KafkaConnection {
         return inFlightCount.get();
     }
 
+    @Override
+    public boolean isSendBlocked() {
+        // No new request can go out right now: the in-flight window is full, or the broker
+        // has throttled this connection (KIP-219). Either way the accumulator should treat
+        // the destination as backpressured (D9b).
+        return throttleWindows.get() > 0 || inFlightCount.get() >= spec.maxInFlight();
+    }
+
     CompletableFuture<KafkaConnection> readyFuture() {
         return readyFuture;
     }
@@ -168,10 +181,7 @@ final class NettyKafkaConnection implements KafkaConnection {
         }
         // The timeout callback always runs on the event loop; the scheduler seam lets the
         // deterministic simulation harness own all timed events (D13).
-        Runnable onTimeout = () -> runOnEventLoop(() -> onRequestTimeout(entry));
-        entry.timeoutTask = spec.timeoutScheduler() != null
-            ? spec.timeoutScheduler().schedule(onTimeout, spec.requestTimeout().toMillis(), TimeUnit.MILLISECONDS)
-            : channel.eventLoop().schedule(onTimeout, spec.requestTimeout().toMillis(), TimeUnit.MILLISECONDS);
+        entry.timeoutTask = scheduleOnLoop(() -> onRequestTimeout(entry), spec.requestTimeout().toMillis());
         // Negotiation must precede any user request that may already be queued.
         if (entry.negotiation)
             pending.addFirst(entry);
@@ -187,6 +197,7 @@ final class NettyKafkaConnection implements KafkaConnection {
     private void writePending() {
         boolean wroteAny = false;
         while (state != State.CLOSED
+            && throttleWindows.get() == 0
             && inFlight.size() < spec.maxInFlight()
             && !pending.isEmpty()
             && (state == State.READY || pending.peekFirst().negotiation)) {
@@ -196,6 +207,31 @@ final class NettyKafkaConnection implements KafkaConnection {
         }
         if (wroteAny)
             channel.flush();
+    }
+
+    /** Schedule a task on the connection's timeline (the sim scheduler seam or event loop). */
+    private ScheduledFuture<?> scheduleOnLoop(Runnable task, long delayMs) {
+        Runnable onLoop = () -> runOnEventLoop(task);
+        return spec.timeoutScheduler() != null
+            ? spec.timeoutScheduler().schedule(onLoop, delayMs, TimeUnit.MILLISECONDS)
+            : channel.eventLoop().schedule(onLoop, delayMs, TimeUnit.MILLISECONDS);
+    }
+
+    /**
+     * Honor a broker throttle (KIP-219): pause writes on this connection for the window, then
+     * resume. Overlapping throttles are counted so writes resume only after the last one
+     * elapses; in-flight responses keep being read throughout.
+     */
+    private void applyThrottle(int throttleTimeMs) {
+        if (throttleTimeMs <= 0 || state == State.CLOSED)
+            return;
+        throttleWindows.incrementAndGet();
+        scheduleOnLoop(() -> {
+            if (state == State.CLOSED)
+                return;
+            if (throttleWindows.decrementAndGet() == 0)
+                writePending();
+        }, throttleTimeMs);
     }
 
     /** @return true if the request went onto the channel write queue */
@@ -267,10 +303,14 @@ final class NettyKafkaConnection implements KafkaConnection {
             return;
         }
 
-        if (entry.negotiation)
+        if (entry.negotiation) {
             handleApiVersionsResponse(entry, (ApiVersionsResponse) response);
-        else
+        } else {
             entry.future.complete(response);
+            // KIP-219: if the broker throttled this response, stop sending on the connection
+            // for the throttle window (the accumulator sees the destination as backpressured).
+            applyThrottle(response.throttleTimeMs());
+        }
         writePending();
     }
 
