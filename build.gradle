@@ -3665,6 +3665,7 @@ project(':jmh-benchmarks') {
     implementation project(':server')
     implementation project(':raft')
     implementation project(':clients')
+    implementation project(':clients-v2')
     implementation project(':coordinator-common')
     implementation testFixtures(project(':coordinator-common'))
     implementation project(':group-coordinator')

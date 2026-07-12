@@ -28,7 +28,7 @@ import org.apache.kafka.common.TopicPartition;
  * growing, never correctness. Unknown destinations (no metadata, no connection yet) must
  * report {@code false}.
  */
-interface BackpressureSignal {
+public interface BackpressureSignal {
 
     BackpressureSignal NEVER = new BackpressureSignal() {
         @Override

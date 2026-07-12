@@ -38,7 +38,7 @@ import io.netty.buffer.Unpooled;
  * File-backed components (broker-side fetch responses) are read into pooled buffers — the
  * {@code FileRegion} translation is a later, server-transport deliverable.
  */
-final class ByteBufSinkChannel implements TransferableChannel {
+public final class ByteBufSinkChannel implements TransferableChannel {
 
     private final ByteBufAllocator allocator;
     private final CompositeByteBuf composite;
@@ -50,7 +50,7 @@ final class ByteBufSinkChannel implements TransferableChannel {
     }
 
     /** Fully drain the given send into a single (composite) buffer. */
-    static ByteBuf drain(Send send, ByteBufAllocator allocator) throws IOException {
+    public static ByteBuf drain(Send send, ByteBufAllocator allocator) throws IOException {
         ByteBufSinkChannel sink = new ByteBufSinkChannel(allocator);
         while (!send.completed()) {
             long written = send.writeTo(sink);

@@ -20,6 +20,7 @@ import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.compress.Compression;
 import org.apache.kafka.common.header.Header;
 import org.apache.kafka.common.record.TimestampType;
+import org.apache.kafka.common.record.internal.CompressionRatioEstimator;
 import org.apache.kafka.common.record.internal.MemoryRecords;
 import org.apache.kafka.common.record.internal.MemoryRecordsBuilder;
 import org.apache.kafka.common.record.internal.RecordBatch;
@@ -49,24 +50,37 @@ public final class BatchV2 {
     /** Bytes charged against the memory budget; grows with backpressure top-ups. */
     private final java.util.concurrent.atomic.AtomicInteger memoryCharged;
 
+    private final String topic;
+    private final Compression compression;
+
     private volatile TopicPartition partition; // null while unbound (D14)
     private volatile boolean sealed = false;
+    private volatile boolean succeeded = false;
     private volatile MemoryRecords records;
     private final java.util.concurrent.atomic.AtomicInteger attempts =
         new java.util.concurrent.atomic.AtomicInteger();
 
     /**
-     * @param initialCapacity  buffer pre-allocation, normally {@code batch.size}
-     * @param hardLimitBytes   absolute write limit, normally {@code backpressure.batch.size};
-     *                         appends beyond it are refused regardless of backpressure state
+     * @param buffer          the batch buffer (pooled {@code batch.size} normally; a full
+     *                        {@code backpressure.batch.size} allocation when created under
+     *                        saturation, avoiding realloc-copy chains)
+     * @param hardLimitBytes  absolute write limit, normally {@code backpressure.batch.size};
+     *                        appends beyond it are refused regardless of backpressure state
      */
-    BatchV2(TopicPartition partition, int initialCapacity, int hardLimitBytes,
+    BatchV2(TopicPartition partition, String topic, ByteBuffer buffer, int hardLimitBytes,
             Compression compression, long nowMs, int memoryCharged) {
         this.partition = partition;
+        this.topic = topic;
+        this.compression = compression;
         this.createdMs = nowMs;
         this.memoryCharged = new java.util.concurrent.atomic.AtomicInteger(memoryCharged);
-        this.builder = MemoryRecords.builder(ByteBuffer.allocate(initialCapacity), compression,
+        this.builder = MemoryRecords.builder(buffer, compression,
             TimestampType.CREATE_TIME, 0L, hardLimitBytes);
+        // Seed full-detection from observed per-topic compression ratios, like the classic
+        // producer: fewer expandBuffer realloc-copies when the estimate is realistic.
+        if (compression.type() != org.apache.kafka.common.record.internal.CompressionType.NONE)
+            builder.setEstimatedCompressionRatio(
+                CompressionRatioEstimator.estimation(topic, compression.type()));
     }
 
     /**
@@ -126,7 +140,7 @@ public final class BatchV2 {
         attempts.incrementAndGet();
     }
 
-    TopicPartition partition() {
+    public TopicPartition partition() {
         return partition;
     }
 
@@ -157,19 +171,35 @@ public final class BatchV2 {
         records = builder.build();
     }
 
-    MemoryRecords records() {
+    public MemoryRecords records() {
         if (!sealed)
             throw new IllegalStateException("Batch not sealed");
         return records;
     }
 
     /** Completes every record future with its final offset and timestamp. */
-    void completeSuccessfully(long baseOffset, long logAppendTime) {
+    public void completeSuccessfully(long baseOffset, long logAppendTime) {
+        succeeded = true;
+        if (compression.type() != org.apache.kafka.common.record.internal.CompressionType.NONE)
+            CompressionRatioEstimator.updateEstimation(topic, compression.type(),
+                (float) builder.compressionRatio());
         for (int i = 0; i < futures.size(); i++) {
             long timestamp = logAppendTime != RecordBatch.NO_TIMESTAMP ? logAppendTime : timestamps.get(i);
             futures.get(i).complete(new RecordMetadataV2(partition, baseOffset + i, timestamp));
         }
         done.complete(null);
+    }
+
+    boolean succeeded() {
+        return succeeded;
+    }
+
+    /**
+     * The buffer currently backing the builder (post-expansion if any). Safe to hand back to
+     * the pool only after {@link #succeeded()} — see {@code BatchBufferSource} ownership rule.
+     */
+    ByteBuffer backingBuffer() {
+        return builder.buffer();
     }
 
     void completeExceptionally(Throwable error) {

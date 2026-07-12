@@ -45,6 +45,8 @@
     <allow pkg="org.apache.kafka.storage"/>
     <allow pkg="org.apache.kafka.streams"/>
     <allow pkg="org.apache.kafka.clients"/>
+    <allow pkg="org.apache.kafka.network.netty"/>
+    <allow pkg="io.netty"/>
     <allow pkg="org.apache.kafka.coordinator.common.runtime"/>
     <allow pkg="org.apache.kafka.coordinator.group"/>
     <allow pkg="org.apache.kafka.coordinator.share"/>

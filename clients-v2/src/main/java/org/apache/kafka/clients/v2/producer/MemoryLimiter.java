@@ -27,12 +27,12 @@ import org.apache.kafka.common.errors.TimeoutException;
  * thread. (An awaitable, FIFO-fair asynchronous acquire is the planned extension for callers
  * that prefer backpressure to failure.)
  */
-final class MemoryLimiter {
+public final class MemoryLimiter {
 
     private final long capacity;
     private long available;
 
-    MemoryLimiter(long capacity) {
+    public MemoryLimiter(long capacity) {
         this.capacity = capacity;
         this.available = capacity;
     }

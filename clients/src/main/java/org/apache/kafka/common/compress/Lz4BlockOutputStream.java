@@ -17,6 +17,7 @@
 package org.apache.kafka.common.compress;
 
 import org.apache.kafka.common.record.internal.CompressionType;
+import org.apache.kafka.common.utils.internals.BufferSupplier;
 import org.apache.kafka.common.utils.internals.ByteUtils;
 
 import net.jpountz.lz4.LZ4Compressor;
@@ -26,6 +27,7 @@ import net.jpountz.xxhash.XXHashFactory;
 
 import java.io.IOException;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 
 /**
  * A partial implementation of the v1.5.1 LZ4 Frame format.
@@ -52,6 +54,9 @@ public final class Lz4BlockOutputStream extends OutputStream {
     private OutputStream out;
     private byte[] buffer;
     private byte[] compressedBuffer;
+    private BufferSupplier workspaceSupplier;
+    private ByteBuffer workBuffer;
+    private ByteBuffer workCompressedBuffer;
     private int bufferOffset;
     private boolean finished;
 
@@ -69,6 +74,20 @@ public final class Lz4BlockOutputStream extends OutputStream {
      * @throws IOException
      */
     public Lz4BlockOutputStream(OutputStream out, int blockSize, int level, boolean blockChecksum, boolean useBrokenFlagDescriptorChecksum) throws IOException {
+        this(out, blockSize, level, blockChecksum, useBrokenFlagDescriptorChecksum, null);
+    }
+
+    /**
+     * As above, but the two block work buffers (~64 KB each at the default block size, per
+     * stream) are acquired from the supplier and released on {@link #close()}, so a producer
+     * building many batches can reuse them instead of allocating fresh arrays per batch.
+     *
+     * @param workspaceSupplier supplier for the block buffers, or null to allocate normally.
+     *                          Must supply heap ({@code hasArray()}) buffers.
+     */
+    public Lz4BlockOutputStream(OutputStream out, int blockSize, int level, boolean blockChecksum,
+                                boolean useBrokenFlagDescriptorChecksum,
+                                BufferSupplier workspaceSupplier) throws IOException {
         this.out = out;
         /*
          * lz4-java provides two types of compressors; fastCompressor, which requires less memory but fast compression speed (with default compression level only),
@@ -83,8 +102,29 @@ public final class Lz4BlockOutputStream extends OutputStream {
         flg = new FLG(blockChecksum);
         bufferOffset = 0;
         maxBlockSize = bd.getBlockMaximumSize();
-        buffer = new byte[maxBlockSize];
-        compressedBuffer = new byte[compressor.maxCompressedLength(maxBlockSize)];
+        int compressedBufferSize = compressor.maxCompressedLength(maxBlockSize);
+        if (workspaceSupplier != null) {
+            ByteBuffer workBuffer = workspaceSupplier.get(maxBlockSize);
+            ByteBuffer workCompressedBuffer = workspaceSupplier.get(compressedBufferSize);
+            if (workBuffer.hasArray() && workCompressedBuffer.hasArray()) {
+                this.workspaceSupplier = workspaceSupplier;
+                this.workBuffer = workBuffer;
+                this.workCompressedBuffer = workCompressedBuffer;
+                buffer = workBuffer.array();
+                compressedBuffer = workCompressedBuffer.array();
+            } else {
+                // Direct buffers cannot back the byte[] block API; fall back to fresh arrays.
+                workspaceSupplier.release(workBuffer);
+                workspaceSupplier.release(workCompressedBuffer);
+                this.workspaceSupplier = null;
+                buffer = new byte[maxBlockSize];
+                compressedBuffer = new byte[compressedBufferSize];
+            }
+        } else {
+            this.workspaceSupplier = null;
+            buffer = new byte[maxBlockSize];
+            compressedBuffer = new byte[compressedBufferSize];
+        }
         finished = false;
         writeHeader();
     }
@@ -251,6 +291,13 @@ public final class Lz4BlockOutputStream extends OutputStream {
                     }
                 }
             } finally {
+                if (workspaceSupplier != null) {
+                    workspaceSupplier.release(workBuffer);
+                    workspaceSupplier.release(workCompressedBuffer);
+                    workspaceSupplier = null;
+                    workBuffer = null;
+                    workCompressedBuffer = null;
+                }
                 out = null;
                 buffer = null;
                 compressedBuffer = null;

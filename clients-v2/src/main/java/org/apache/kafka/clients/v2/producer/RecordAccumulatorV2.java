@@ -42,24 +42,30 @@ import java.util.concurrent.ConcurrentMap;
  * <p>Appends synchronize on the per-queue lock, like the classic accumulator. Batches are
  * sealed (D15 seam) exactly once, at drain.
  */
-final class RecordAccumulatorV2 {
+public final class RecordAccumulatorV2 {
 
     private final ProducerSettings settings;
     private final MemoryLimiter limiter;
     private final BatchSealer sealer;
     private final BackpressureSignal backpressure;
+    private final BatchBufferSource buffers;
+    private final org.apache.kafka.common.compress.Compression compression;
 
     private final ConcurrentMap<TopicPartition, Deque<BatchV2>> bound = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, Deque<BatchV2>> unbound = new ConcurrentHashMap<>();
     private final Set<BatchV2> incomplete = ConcurrentHashMap.newKeySet();
     private volatile boolean flushRequested = false;
 
-    RecordAccumulatorV2(ProducerSettings settings, MemoryLimiter limiter, BatchSealer sealer,
+    public RecordAccumulatorV2(ProducerSettings settings, MemoryLimiter limiter, BatchSealer sealer,
                         BackpressureSignal backpressure) {
         this.settings = settings;
         this.limiter = limiter;
         this.sealer = sealer;
         this.backpressure = backpressure;
+        this.buffers = new BatchBufferSource(settings.batchSize(),
+            (int) Math.min(1024, Math.max(2, settings.bufferMemory() / settings.batchSize())));
+        // Pool per-batch compression workspaces (lz4's two ~64KB arrays) across batches (D12).
+        this.compression = WorkspacePooledCompression.wrapIfPoolable(settings.compression());
     }
 
     /**
@@ -70,7 +76,7 @@ final class RecordAccumulatorV2 {
      * {@code backpressure.batch.size} — it cannot be sent yet anyway, and one large request
      * beats several small ones once the window opens.
      */
-    CompletableFuture<RecordMetadataV2> append(String topic, PartitionAssignment assignment,
+    public CompletableFuture<RecordMetadataV2> append(String topic, PartitionAssignment assignment,
                                                long timestamp, byte[] key, byte[] value,
                                                Header[] headers, long nowMs) {
         Deque<BatchV2> queue;
@@ -92,14 +98,31 @@ final class RecordAccumulatorV2 {
             if (last != null && last.hasRoomFor(timestamp, key, value, headers, softLimit)
                 && fundGrowth(last, recordUpperBound))
                 return last.append(timestamp, key, value, headers);
-            int initialCharge = Math.max(settings.batchSize(), recordUpperBound);
-            limiter.acquireNow(initialCharge);
-            BatchV2 batch = new BatchV2(partition, settings.batchSize(),
-                settings.backpressureBatchSize(), settings.compression(), nowMs, initialCharge);
+
+            // A batch born under saturation will (soft-limit permitting) grow to the
+            // backpressure size anyway — allocate it full-size up front to avoid a chain of
+            // 1.1x realloc-copies, budget permitting. Otherwise a pooled batch.size buffer.
+            java.nio.ByteBuffer buffer;
+            int initialCharge;
+            int backpressureCharge = Math.max(settings.backpressureBatchSize(), recordUpperBound);
+            if (saturated && limiter.tryAcquire(backpressureCharge)) {
+                initialCharge = backpressureCharge;
+                buffer = java.nio.ByteBuffer.allocate(settings.backpressureBatchSize());
+            } else {
+                initialCharge = Math.max(settings.batchSize(), recordUpperBound);
+                limiter.acquireNow(initialCharge);
+                buffer = buffers.acquire();
+            }
+            BatchV2 batch = new BatchV2(partition, topic, buffer,
+                settings.backpressureBatchSize(), compression, nowMs, initialCharge);
             incomplete.add(batch);
             batch.doneFuture().whenComplete((v, e) -> {
                 incomplete.remove(batch);
                 limiter.release(batch.memoryCharged());
+                // Reuse is only safe after success (see BatchBufferSource ownership rule);
+                // odd-sized (backpressure/expanded) buffers are rejected by the pool itself.
+                if (batch.succeeded())
+                    buffers.recycle(batch.backingBuffer());
             });
             queue.addLast(batch);
             return batch.append(timestamp, key, value, headers);
@@ -139,7 +162,7 @@ final class RecordAccumulatorV2 {
         return size;
     }
 
-    Set<String> topics() {
+    public Set<String> topics() {
         Set<String> topics = new HashSet<>(unbound.keySet());
         for (TopicPartition tp : bound.keySet())
             topics.add(tp.topic());
@@ -184,7 +207,7 @@ final class RecordAccumulatorV2 {
      * <em>without sealing</em>: their open batch keeps accepting records up to
      * {@code backpressure.batch.size} until the window opens.
      */
-    Map<Node, List<BatchV2>> drain(Cluster cluster, long nowMs) {
+    public Map<Node, List<BatchV2>> drain(Cluster cluster, long nowMs) {
         bindReadyUnboundBatches(cluster, nowMs);
 
         Map<Node, List<BatchV2>> drained = new HashMap<>();

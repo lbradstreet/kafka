@@ -52,6 +52,22 @@ public class Lz4Compression implements Compression {
         }
     }
 
+    /**
+     * As {@link #wrapForOutput(ByteBufferOutputStream, byte)}, but the stream's two ~64 KB
+     * block work buffers come from (and return to) the supplier instead of being allocated
+     * fresh per stream — the output-side counterpart of the decompression supplier taken by
+     * {@link #wrapForInput(ByteBuffer, byte, BufferSupplier)}.
+     */
+    public OutputStream wrapForOutput(ByteBufferOutputStream buffer, byte messageVersion,
+                                      BufferSupplier workspaceSupplier) {
+        try {
+            return new Lz4BlockOutputStream(buffer, Lz4BlockOutputStream.BLOCKSIZE_64KB, level,
+                false, messageVersion == RecordBatch.MAGIC_VALUE_V0, workspaceSupplier);
+        } catch (Throwable e) {
+            throw new KafkaException(e);
+        }
+    }
+
     @Override
     public InputStream wrapForInput(ByteBuffer inputBuffer, byte messageVersion, BufferSupplier decompressionBufferSupplier) {
         try {
