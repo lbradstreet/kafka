@@ -51,6 +51,14 @@ keyed/late-bound assignments, consumed back and compared exactly):
   same-seed trace-equality under faults, 20-seed faulty-network liveness +
   no-invented-acks sweep, and a D14 rebind-under-total-leader-failover scenario — all in
   seconds of wall clock.
+- **Producer hot-path optimizations (D9b, D12)** — landed with comparative JMH benchmarks
+  (`jmh-benchmarks/.../producer/`). Compression-ratio seeding, pooled batch buffers
+  (`BatchBufferSource`, recycle-on-success only), full-size allocation for batches born
+  under backpressure, and reuse of LZ4's ~64 KB output workspaces
+  (`WorkspacePooledCompression` over a new additive `Lz4Compression.wrapForOutput`
+  overload). Measured allocation-per-record on the full v2 accumulation path drops
+  **49–96 %** for LZ4/ZSTD; buffer pooling alone removes the entire ~16 KB per-batch
+  allocation for uncompressed batches. See [BENCHMARKS.md](BENCHMARKS.md).
 
 **Scope note:** this effort is producer-focused. Consumer groups, fetch sessions and other
 consumer-side depth are **deferred indefinitely** — the assign-based consumer exists only
