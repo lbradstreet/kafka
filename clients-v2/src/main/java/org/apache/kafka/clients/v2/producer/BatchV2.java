@@ -46,7 +46,8 @@ public final class BatchV2 {
     private final List<Long> timestamps = new ArrayList<>();
     private final CompletableFuture<Void> done = new CompletableFuture<>();
     private final long createdMs;
-    private final int memoryCharged;
+    /** Bytes charged against the memory budget; grows with backpressure top-ups. */
+    private final java.util.concurrent.atomic.AtomicInteger memoryCharged;
 
     private volatile TopicPartition partition; // null while unbound (D14)
     private volatile boolean sealed = false;
@@ -63,7 +64,7 @@ public final class BatchV2 {
             Compression compression, long nowMs, int memoryCharged) {
         this.partition = partition;
         this.createdMs = nowMs;
-        this.memoryCharged = memoryCharged;
+        this.memoryCharged = new java.util.concurrent.atomic.AtomicInteger(memoryCharged);
         this.builder = MemoryRecords.builder(ByteBuffer.allocate(initialCapacity), compression,
             TimestampType.CREATE_TIME, 0L, hardLimitBytes);
     }
@@ -105,7 +106,12 @@ public final class BatchV2 {
     }
 
     int memoryCharged() {
-        return memoryCharged;
+        return memoryCharged.get();
+    }
+
+    /** Record additional budget acquired to fund growth past the initial charge. */
+    void addMemoryCharge(int bytes) {
+        memoryCharged.addAndGet(bytes);
     }
 
     int recordCount() {

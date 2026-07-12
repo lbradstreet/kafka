@@ -86,13 +86,16 @@ final class RecordAccumulatorV2 {
             saturated = backpressure.isTopicSaturated(topic);
         }
         int softLimit = saturated ? settings.backpressureBatchSize() : settings.batchSize();
+        int recordUpperBound = recordSizeUpperBound(key, value, headers);
         synchronized (queue) {
             BatchV2 last = queue.peekLast();
-            if (last != null && last.hasRoomFor(timestamp, key, value, headers, softLimit))
+            if (last != null && last.hasRoomFor(timestamp, key, value, headers, softLimit)
+                && fundGrowth(last, recordUpperBound))
                 return last.append(timestamp, key, value, headers);
-            limiter.acquireNow(settings.batchSize());
+            int initialCharge = Math.max(settings.batchSize(), recordUpperBound);
+            limiter.acquireNow(initialCharge);
             BatchV2 batch = new BatchV2(partition, settings.batchSize(),
-                settings.backpressureBatchSize(), settings.compression(), nowMs, settings.batchSize());
+                settings.backpressureBatchSize(), settings.compression(), nowMs, initialCharge);
             incomplete.add(batch);
             batch.doneFuture().whenComplete((v, e) -> {
                 incomplete.remove(batch);
@@ -101,6 +104,39 @@ final class RecordAccumulatorV2 {
             queue.addLast(batch);
             return batch.append(timestamp, key, value, headers);
         }
+    }
+
+    /**
+     * Ensure the batch's budget charge covers the append about to happen. Growth past the
+     * initial {@code batch.size} charge (backpressure sealing) is funded incrementally; if
+     * the budget cannot cover it the batch simply stops growing — the caller falls through
+     * to a new batch, whose own charge applies normal fail-fast semantics.
+     */
+    private boolean fundGrowth(BatchV2 batch, int recordUpperBound) {
+        int shortfall = batch.estimatedSizeInBytes() + recordUpperBound - batch.memoryCharged();
+        if (shortfall <= 0)
+            return true;
+        // Round top-ups up to reduce limiter traffic on hot paths.
+        int topUp = Math.max(shortfall, settings.batchSize() / 4);
+        if (!limiter.tryAcquire(topUp))
+            return false;
+        batch.addMemoryCharge(topUp);
+        return true;
+    }
+
+    /** Conservative per-record budget estimate (varint framing overestimated, never under). */
+    private static int recordSizeUpperBound(byte[] key, byte[] value, Header[] headers) {
+        int size = 64;
+        if (key != null)
+            size += key.length;
+        if (value != null)
+            size += value.length;
+        for (Header header : headers) {
+            size += 16 + 4 * header.key().length();
+            if (header.value() != null)
+                size += header.value().length;
+        }
+        return size;
     }
 
     Set<String> topics() {

@@ -170,7 +170,11 @@ one larger request goes out instead of a queue of small ones. The saturation sig
 view and the connection's in-flight count, never blocking or doing I/O on the send path.
 Unbound (D14) batches use the topic-level signal: they keep growing only while *every*
 available leader is saturated, since drain-time binding could otherwise route them to a
-leader with room.
+leader with room. Growth is honest against the memory budget (D9): each batch's
+`buffer.memory` charge starts at `max(batch.size, record estimate)` and is topped up
+incrementally as the batch grows; if the budget cannot fund further growth the batch
+simply stops growing (degrading to normal sealing) rather than overrunning the limiter,
+and the full accumulated charge is released when the batch completes.
 
 ### D10 — Threading
 One shared `EventLoopGroup` (epoll where available) per `KafkaClientRuntime`, shareable

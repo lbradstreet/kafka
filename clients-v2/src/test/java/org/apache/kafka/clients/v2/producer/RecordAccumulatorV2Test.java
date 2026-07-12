@@ -175,6 +175,52 @@ public class RecordAccumulatorV2Test {
     }
 
     @Test
+    public void testBackpressureGrowthIsFundedAgainstTheBudget() {
+        SwitchableSignal signal = new SwitchableSignal();
+        signal.saturated = true;
+        int batchSize = 256;
+        MemoryLimiter limiter = new MemoryLimiter(600); // less than the 1024 backpressure limit
+        ClientSettings client = ClientSettings.newBuilder("localhost:9092").build();
+        ProducerSettings settings = ProducerSettings.newBuilder(client)
+            .batchSize(batchSize)
+            .backpressureBatchSize(4 * batchSize)
+            .linger(Duration.ZERO)
+            .build();
+        RecordAccumulatorV2 accumulator =
+            new RecordAccumulatorV2(settings, limiter, BatchSealer.NO_OP, signal);
+        PartitionAssignment fixed = new PartitionAssignment.Fixed(0);
+
+        // Growth past batch.size is funded incrementally; once the budget is dry the batch
+        // stops growing and the next batch's charge fails fast.
+        boolean exhausted = false;
+        for (int i = 0; i < 40 && !exhausted; i++) {
+            try {
+                accumulator.append(TOPIC, fixed, 0L, null, VALUE, NO_HEADERS, 0L);
+            } catch (org.apache.kafka.common.errors.TimeoutException e) {
+                exhausted = true;
+            }
+        }
+        assertTrue(exhausted, "budget exhaustion must surface once growth cannot be funded");
+
+        // Every batch's actual size stays within what was charged for it — the budget was
+        // never silently exceeded.
+        signal.saturated = false;
+        long released = 0;
+        Map<Node, List<BatchV2>> drained;
+        while (!(drained = accumulator.drain(cluster(1), 1L)).isEmpty()) {
+            for (BatchV2 batch : drained.get(NODE)) {
+                assertTrue(batch.records().sizeInBytes() <= batch.memoryCharged(),
+                    "batch bytes " + batch.records().sizeInBytes()
+                        + " exceed its charge " + batch.memoryCharged());
+                released += batch.memoryCharged();
+                batch.completeSuccessfully(0L, -1L);
+            }
+        }
+        assertTrue(released > batchSize, "growth top-ups should have been charged");
+        assertEquals(600, limiter.available(), "completing all batches must return the full budget");
+    }
+
+    @Test
     public void testSealedBatchKeepsPartitionOnReenqueue() {
         RecordAccumulatorV2 accumulator = accumulator(16 * 1024, Duration.ZERO);
         accumulator.append(TOPIC, PartitionAssignment.DEFERRED, 0L, null, VALUE, NO_HEADERS, 0L);

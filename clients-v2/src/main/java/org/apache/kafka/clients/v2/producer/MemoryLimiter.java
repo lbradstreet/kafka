@@ -48,6 +48,19 @@ final class MemoryLimiter {
         available -= bytes;
     }
 
+    /**
+     * Non-throwing variant used to fund incremental batch growth (backpressure sealing):
+     * a refusal just stops the batch from growing, it is not an error.
+     *
+     * @return true if the bytes were acquired
+     */
+    synchronized boolean tryAcquire(int bytes) {
+        if (bytes > available)
+            return false;
+        available -= bytes;
+        return true;
+    }
+
     synchronized void release(int bytes) {
         available = Math.min(capacity, available + bytes);
     }
