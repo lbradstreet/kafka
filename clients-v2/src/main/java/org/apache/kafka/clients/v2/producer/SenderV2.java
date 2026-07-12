@@ -24,6 +24,7 @@ import org.apache.kafka.common.Node;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.RetriableException;
+import org.apache.kafka.common.errors.TimeoutException;
 import org.apache.kafka.common.message.ProduceRequestData;
 import org.apache.kafka.common.protocol.Errors;
 import org.apache.kafka.common.requests.ProduceRequest;
@@ -116,8 +117,13 @@ final class SenderV2 {
             accumulator.clearFlushIfDrained();
             if (closing && (accumulator.isEmpty()
                 || runtime.time().milliseconds() >= closeDeadlineMs)) {
-                if (!accumulator.isEmpty())
-                    log.warn("v2 producer close deadline reached with unsent batches");
+                if (!accumulator.isEmpty()) {
+                    // Never strand batches: fail their futures (and release their budget via the
+                    // done hook) rather than leave send() callers blocked forever past close.
+                    log.warn("v2 producer close deadline reached with unsent batches; failing them");
+                    accumulator.failAll(new TimeoutException(
+                        "Producer closed before these records could be sent"));
+                }
                 closedFuture.complete(null);
                 return;
             }
@@ -159,20 +165,34 @@ final class SenderV2 {
     private void sendProduceRequest(Node node, List<BatchV2> batches, Cluster cluster) {
         // A batch polled out of the accumulator is owned by this method: every exit path —
         // including unexpected exceptions — must complete or re-enqueue it, or its futures hang.
+        // Connection pooling (#4): split the node's batches by the connection each partition is
+        // pinned to, so different partitions pipeline in parallel while a partition keeps a
+        // single ordered connection. One ProduceRequest per connection.
+        Map<Integer, List<BatchV2>> byConnection;
         try {
-            // Connection pooling (#4): split the node's batches by the connection each
-            // partition is pinned to, so different partitions pipeline in parallel while a
-            // partition keeps a single ordered connection. One ProduceRequest per connection.
-            Map<Integer, List<BatchV2>> byConnection = new HashMap<>();
+            byConnection = new HashMap<>();
             for (BatchV2 batch : batches)
                 byConnection.computeIfAbsent(dispatcher.connectionIndex(batch.partition()),
                     c -> new ArrayList<>()).add(batch);
-            for (Map.Entry<Integer, List<BatchV2>> entry : byConnection.entrySet())
-                doSendProduceRequest(node, entry.getKey(), entry.getValue(), cluster);
         } catch (Throwable t) {
-            log.warn("Failed to build/dispatch produce request to {}", node, t);
+            log.warn("Failed to group produce batches for {}", node, t);
             for (BatchV2 batch : batches)
                 retryOrFail(batch, t, t instanceof RetriableException);
+            return;
+        }
+        // Each connection group dispatches independently. The catch must scope to this group's
+        // batches only: a build/dispatch failure here must never re-process a sibling group
+        // whose send is already in flight (that would double-send, double-complete, and recycle
+        // a buffer still referenced by the outstanding frame).
+        for (Map.Entry<Integer, List<BatchV2>> entry : byConnection.entrySet()) {
+            try {
+                doSendProduceRequest(node, entry.getKey(), entry.getValue(), cluster);
+            } catch (Throwable t) {
+                log.warn("Failed to build/dispatch produce request to {} connection {}",
+                    node, entry.getKey(), t);
+                for (BatchV2 batch : entry.getValue())
+                    retryOrFail(batch, t, t instanceof RetriableException);
+            }
         }
     }
 
@@ -212,7 +232,7 @@ final class SenderV2 {
                         ? error.getCause() : error;
                     for (BatchV2 batch : byPartition.values())
                         retryOrFail(batch, cause, cause instanceof RetriableException
-                            || cause instanceof org.apache.kafka.common.errors.TimeoutException);
+                            || cause instanceof TimeoutException);
                 } else {
                     handleProduceResponse((ProduceResponse) response, byPartition, idToName);
                 }

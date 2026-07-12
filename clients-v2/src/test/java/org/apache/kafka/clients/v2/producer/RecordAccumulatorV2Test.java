@@ -26,9 +26,11 @@ import org.apache.kafka.common.header.Header;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -218,6 +220,72 @@ public class RecordAccumulatorV2Test {
         }
         assertTrue(released > batchSize, "growth top-ups should have been charged");
         assertEquals(600, limiter.available(), "completing all batches must return the full budget");
+    }
+
+    @Test
+    public void testFailAllCompletesEveryPendingFutureAndReleasesBudget() {
+        // Close-deadline path: batches that never got sent must be failed, not stranded —
+        // every send() future completes and the whole budget comes back.
+        MemoryLimiter limiter = new MemoryLimiter(1 << 20);
+        ClientSettings client = ClientSettings.newBuilder("localhost:9092").build();
+        ProducerSettings settings = ProducerSettings.newBuilder(client)
+            .batchSize(256).backpressureBatchSize(1024).linger(Duration.ofMinutes(1)).build();
+        RecordAccumulatorV2 accumulator =
+            new RecordAccumulatorV2(settings, limiter, BatchSealer.NO_OP, BackpressureSignal.NEVER);
+        PartitionAssignment fixed = new PartitionAssignment.Fixed(0);
+
+        List<CompletableFuture<RecordMetadataV2>> futures = new ArrayList<>();
+        for (int i = 0; i < 10; i++)
+            futures.add(accumulator.append(TOPIC, fixed, 0L, null, VALUE, NO_HEADERS, 0L));
+        assertTrue(limiter.available() < (1 << 20), "budget is charged while batches are open");
+
+        accumulator.failAll(new org.apache.kafka.common.errors.TimeoutException("closed"));
+
+        for (CompletableFuture<RecordMetadataV2> future : futures)
+            assertTrue(future.isCompletedExceptionally(), "every pending record future must fail");
+        assertTrue(accumulator.isEmpty(), "failed batches leave the accumulator empty");
+        assertEquals(1 << 20, limiter.available(), "failAll must release all charged budget");
+    }
+
+    @Test
+    public void testDrainNeverExceedsMaxRequestSizeWithBackpressureGrownBatches() {
+        // The per-(node,connection) drain cap must estimate an unsealed batch at its real grown
+        // size, not the batch.size soft limit — otherwise several backpressure-grown batches
+        // sharing one connection assemble a request past max.request.size.
+        SwitchableSignal signal = new SwitchableSignal();
+        signal.saturated = true;
+        int batchSize = 256;
+        int maxRequestSize = 2048;
+        MemoryLimiter limiter = new MemoryLimiter(1 << 20);
+        ClientSettings client = ClientSettings.newBuilder("localhost:9092").build();
+        ProducerSettings settings = ProducerSettings.newBuilder(client)
+            .batchSize(batchSize).backpressureBatchSize(4 * batchSize)
+            .maxRequestSize(maxRequestSize).linger(Duration.ZERO).build();
+        RecordAccumulatorV2 accumulator =
+            new RecordAccumulatorV2(settings, limiter, BatchSealer.NO_OP, signal);
+
+        // Grow six partitions well past batch.size under saturation. Default connectionIndex
+        // pins them all to one (node, connection), so each drain round is one request.
+        for (int p = 0; p < 6; p++) {
+            PartitionAssignment fixed = new PartitionAssignment.Fixed(p);
+            for (int i = 0; i < 12; i++)
+                accumulator.append(TOPIC, fixed, 0L, null, VALUE, NO_HEADERS, 0L);
+        }
+
+        signal.saturated = false;
+        boolean sawMultiBatchRound = false;
+        Map<Node, List<BatchV2>> drained;
+        while (!(drained = accumulator.drain(cluster(6), 1L)).isEmpty()) {
+            int roundBytes = 0;
+            for (BatchV2 batch : drained.get(NODE))
+                roundBytes += batch.records().sizeInBytes();
+            assertTrue(roundBytes <= maxRequestSize,
+                "a drain round must stay within max.request.size, was " + roundBytes);
+            sawMultiBatchRound |= drained.get(NODE).size() > 1;
+            for (BatchV2 batch : drained.get(NODE))
+                batch.completeSuccessfully(0L, -1L);
+        }
+        assertTrue(sawMultiBatchRound, "cap should still pack multiple batches per request");
     }
 
     @Test

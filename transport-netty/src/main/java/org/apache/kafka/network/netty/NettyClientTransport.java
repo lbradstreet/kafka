@@ -102,8 +102,11 @@ public final class NettyClientTransport implements ClientTransport {
                         .createSslEngine(address.getHostString(), address.getPort());
                     ch.pipeline().addLast("ssl", new SslHandler(engine));
                 }
+                // maxReceiveBytes is a payload limit; the decoder's frameLength includes the
+                // 4-byte length prefix, so add 4 to admit a response whose payload is exactly
+                // maxReceiveBytes (matching the classic client's prefix-excluded comparison).
                 ch.pipeline().addLast("frameDecoder",
-                    new LengthFieldBasedFrameDecoder(spec.maxReceiveBytes(), 0, 4, 0, 4));
+                    new LengthFieldBasedFrameDecoder(spec.maxReceiveBytes() + 4, 0, 4, 0, 4));
                 NettyKafkaConnection connection = new NettyKafkaConnection(connectionId, ch, spec);
                 ch.attr(CONNECTION_KEY).set(connection);
                 ch.pipeline().addLast("dispatch", new ResponseDispatchHandler(connection));

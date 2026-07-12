@@ -112,34 +112,55 @@ public final class RecordAccumulatorV2 {
                 && fundGrowth(last, recordUpperBound))
                 return last.append(timestamp, key, value, headers);
 
-            // A batch born under saturation will (soft-limit permitting) grow to the
-            // backpressure size anyway — allocate it full-size up front to avoid a chain of
-            // 1.1x realloc-copies, budget permitting. Otherwise a pooled batch.size buffer.
-            java.nio.ByteBuffer buffer;
-            int initialCharge;
-            int backpressureCharge = Math.max(settings.backpressureBatchSize(), recordUpperBound);
-            if (saturated && limiter.tryAcquire(backpressureCharge)) {
-                initialCharge = backpressureCharge;
-                buffer = java.nio.ByteBuffer.allocate(settings.backpressureBatchSize());
-            } else {
-                initialCharge = Math.max(settings.batchSize(), recordUpperBound);
-                limiter.acquireNow(initialCharge);
-                buffer = buffers.acquire();
-            }
-            BatchV2 batch = new BatchV2(partition, topic, buffer,
-                settings.backpressureBatchSize(), compression, nowMs, initialCharge);
-            incomplete.add(batch);
-            batch.doneFuture().whenComplete((v, e) -> {
-                incomplete.remove(batch);
-                limiter.release(batch.memoryCharged());
-                // Reuse is only safe after success (see BatchBufferSource ownership rule);
-                // odd-sized (backpressure/expanded) buffers are rejected by the pool itself.
-                if (batch.succeeded())
-                    buffers.recycle(batch.backingBuffer());
-            });
+            BatchV2 batch = newBatch(partition, topic, saturated, recordUpperBound, nowMs);
             queue.addLast(batch);
             return batch.append(timestamp, key, value, headers);
         }
+    }
+
+    /**
+     * Allocate, charge, and register a fresh batch. A batch born under saturation will (soft-limit
+     * permitting) grow to the backpressure size anyway, so allocate it full-size up front to avoid
+     * a chain of 1.1x realloc-copies, budget permitting; otherwise take a pooled {@code batch.size}
+     * buffer. The completion hook releases the charge and recycles the buffer.
+     */
+    private BatchV2 newBatch(TopicPartition partition, String topic, boolean saturated,
+                             int recordUpperBound, long nowMs) {
+        java.nio.ByteBuffer buffer;
+        int initialCharge;
+        int backpressureCharge = Math.max(settings.backpressureBatchSize(), recordUpperBound);
+        if (saturated && limiter.tryAcquire(backpressureCharge)) {
+            initialCharge = backpressureCharge;
+            buffer = java.nio.ByteBuffer.allocate(settings.backpressureBatchSize());
+        } else {
+            initialCharge = Math.max(settings.batchSize(), recordUpperBound);
+            limiter.acquireNow(initialCharge);
+            buffer = buffers.acquire();
+        }
+        final BatchV2 batch;
+        try {
+            batch = new BatchV2(partition, topic, buffer,
+                settings.backpressureBatchSize(), compression, nowMs, initialCharge);
+        } catch (RuntimeException | Error constructionFailed) {
+            // The charge (and any pooled buffer) was taken before construction — give both back
+            // so a failed batch can never permanently shrink the budget or the pool.
+            limiter.release(initialCharge);
+            if (buffer.capacity() == settings.batchSize())
+                buffers.recycle(buffer);
+            throw constructionFailed;
+        }
+        incomplete.add(batch);
+        batch.doneFuture().whenComplete((v, e) -> {
+            incomplete.remove(batch);
+            limiter.release(batch.memoryCharged());
+            // Reuse is only safe after success AND only when the batch was sent exactly once
+            // (never retried): a retried batch's earlier, timed-out send may still reference the
+            // same backing array from a closing channel, so recycling now could corrupt it.
+            // Odd-sized (backpressure/expanded) buffers are rejected by the pool itself.
+            if (batch.succeeded() && batch.attempts() == 0)
+                buffers.recycle(batch.backingBuffer());
+        });
+        return batch;
     }
 
     /**
@@ -204,6 +225,17 @@ public final class RecordAccumulatorV2 {
         return futures;
     }
 
+    /**
+     * Fail every still-incomplete batch (e.g. on a close that could not flush in time), so no
+     * caller's {@code send()} future is left hanging and each batch's budget is released via its
+     * completion hook. Iterates a snapshot; {@code completeExceptionally} is a no-op on any batch
+     * that a concurrent response already completed.
+     */
+    void failAll(Throwable cause) {
+        for (BatchV2 batch : new ArrayList<>(incomplete))
+            batch.completeExceptionally(cause);
+    }
+
     /** Re-enqueue a sealed batch for retry; it keeps its partition (D14/D15 rule). */
     void reenqueue(BatchV2 batch) {
         Deque<BatchV2> queue = bound.computeIfAbsent(batch.partition(), tp -> new ArrayDeque<>());
@@ -241,9 +273,13 @@ public final class RecordAccumulatorV2 {
                 BatchV2 batch = queue.peekFirst();
                 if (batch == null || !isDrainable(batch, nowMs))
                     continue;
+                // Estimate the unsealed batch at its actual current size, not the batch.size
+                // soft limit: a batch grown under backpressure can be up to
+                // backpressure.batch.size, and under-counting it here lets several such batches
+                // on one (node, connection) assemble a request past max.request.size.
                 int size = batch.isSealed()
                     ? batch.records().sizeInBytes()
-                    : settings.batchSize();
+                    : batch.estimatedSizeInBytes();
                 String connKey = leader.idString() + "#" + connectionIndex.applyAsInt(tp);
                 int used = connectionBytes.getOrDefault(connKey, 0);
                 if (used > 0 && used + size > settings.maxRequestSize())

@@ -95,6 +95,50 @@ Not yet implemented (per phase plan below): SASL handshake handler, `Selectable`
 broker flag, pooled receive payloads (responses are copied to heap before parse —
 classic-client parity), chunked compression sink, acks=0 fire-and-forget, metrics.
 
+### 0.1 Goal → evidence rollup
+
+Where each goal (§1) stands, and the artifact that demonstrates it. "Partial" means the
+producer path is done and the item is landed where it applies; the deferred remainder is
+listed in "Not yet implemented" above.
+
+| # | Goal | Status | Evidence |
+|---|------|--------|----------|
+| 1 | Modern Java 17 client API | Done (producer/admin; consumer minimal) | `:clients-v2` records/sealed interfaces/`CompletableFuture`; real-broker `V2ClientEndToEndTest` |
+| 2 | Netty transport | Done (client); broker adapter deferred | `NettyKafkaConnection` + `NettyKafkaConnectionTest`; the DST harness runs the *real* transport over `EmbeddedChannel` |
+| 3 | Buffer pooling | Partial — producer batch buffers pooled; receive-side deferred | `BatchBufferSource` (+`BatchBufferSourceTest`); [BENCHMARKS.md](BENCHMARKS.md) shows the per-batch heap alloc removed |
+| 4 | Improved compression | Partial — LZ4 workspace pooling + ratio seeding; chunked sink deferred | `WorkspacePooledCompression`, `BatchV2` estimator seed/feedback; BENCHMARKS.md (49–96 % alloc drop) |
+| 5 | Pipelining | Done | In-flight window + eager write-ahead; connection pooling + per-partition depth (D16); `DstPipeliningTest`, `DstConnectionPoolTest` (>3× vs 50 ms broker), `DstThrottleTest` |
+| 6 | Deterministic simulation (DST) | Done | `DstProducerTest` (multi-seed exactly-once + fault liveness), `DstPipeliningTest`, `DstThrottleTest`, `DstConnectionPoolTest` — all seed-reproducible |
+| 7 | Flexible partitioning (D14) | Done | Late binding in `RecordAccumulatorV2` (`RecordAccumulatorV2Test`); DST rebind-under-total-failover; e2e late-bound records spread across partitions |
+
+**Verification (this branch, latest sweep):** `:transport-netty:check` + `:clients-v2:check`
+green — 6 transport + 68 clients-v2 tests (checkstyle/spotbugs/spotless included); real-broker
+KRaft `V2ClientEndToEndTest` round-trips 500 records (LZ4, keyed + late-bound) with
+`connections.per.broker=3`.
+
+### 0.2 Correctness review sweep
+
+A two-part adversarial review (Netty transport layer; clients-v2 producer path) was run over
+the accumulated diff. The transport layer was traced clean — in-flight window accounting, FIFO
+correlation, KIP-219 throttle handling and all error/close paths verified with no leak or
+mis-correlation. Findings fixed on the producer/transport hot path:
+
+- **Independent per-connection dispatch failure handling** — `SenderV2` groups a node's batches
+  by pool connection and sends one request each; the failure handler now scopes to the failing
+  group only, so a build error in one group can never re-process (double-send / double-complete /
+  recycle-while-referenced) a sibling group whose send is already in flight.
+- **No stranded batches on close** — the close-deadline path now `failAll`s any unsent batches
+  (completing their `send()` futures and releasing their budget) instead of leaving callers
+  blocked forever.
+- **Drain never exceeds `max.request.size`** — the per-`(node, connection)` byte cap estimates an
+  unsealed batch at its real (possibly backpressure-grown) size, not the `batch.size` soft limit.
+- **Budget/buffer never leaked on a failed batch construction**, and a batch buffer is recycled
+  only when the batch was sent exactly once (never retried) — closing a buffer-aliasing hazard
+  against a timed-out earlier send.
+- **Transport hardening** — `NettyKafkaConnection.state` is `volatile` (read cross-thread by
+  `isOpen()`); the frame decoder's length cap is `maxReceiveBytes + 4` so a payload of exactly
+  `maxReceiveBytes` is admitted (prefix-inclusive frame length), matching the classic client.
+
 ## 1. Goals
 
 1. A **modern Java 17 client API** (`kafka-clients-v2`): records, sealed interfaces,

@@ -68,7 +68,9 @@ final class NettyKafkaConnection implements KafkaConnection {
     private final ArrayDeque<Entry> pending = new ArrayDeque<>();
     private final ArrayDeque<Entry> inFlight = new ArrayDeque<>();
     private int nextCorrelationId = 0;
-    private State state = State.NEGOTIATING;
+    // Written only on the event loop, but read from caller threads via isOpen(); volatile gives
+    // those reads a happens-before view of the latest transition instead of a stale value.
+    private volatile State state = State.NEGOTIATING;
 
     // Read from arbitrary threads.
     private volatile NodeApiVersions apiVersions;
